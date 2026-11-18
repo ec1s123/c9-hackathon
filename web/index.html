@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operator Tracker</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./" id="home" title="All teams">
+    <span id="brandIcon" class="brand-icon"></span>
+    <span>
+      <h1>Operator Tracker</h1>
+      <p id="corpus" class="muted"></p>
+    </span>
+  </a>
+  <div class="search">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M13 13l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <input id="q" type="search" placeholder="Search a team, player, agent or map" autocomplete="off" spellcheck="false"
+           role="combobox" aria-expanded="false" aria-controls="qPop" aria-autocomplete="list" aria-label="Search teams, players, agents and maps">
+    <kbd>/</kbd>
+    <div id="qPop" class="pop" role="listbox" hidden></div>
+  </div>
+</header>
+
+<section id="hero" class="hero" aria-label="What you are looking at"></section>
+<section id="filters" class="filters" aria-label="Filters"></section>
+
+<nav class="tabs" id="tabs" role="tablist" hidden>
+  <button data-tab="overview" class="on">Overview</button>
+  <button data-tab="map">Positions</button>
+  <button data-tab="timing">Timing</button>
+  <button data-tab="rotations">Rotations</button>
+  <button data-tab="economy">Economy</button>
+  <button data-tab="rounds">Rounds</button>
+</nav>
+
+<main id="view"></main>
+<div id="tip" class="tip" hidden></div>
+
+<footer class="foot muted">
+  Built from GRID event feeds (Sky's The Limit 2026 hackathon data). Positions are sampled whenever any player
+  uses an ability, deals damage or gets a kill, so tracks are approximate. Missed shots are not recorded: “Operator
+  shots” here always means shots that hit. Callout names are nearest-label estimates. Agent, ability and weapon
+  art belongs to Riot Games and team logos to the teams; they are shown locally and are not part of this project.
+</footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>
