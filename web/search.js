@@ -64,6 +64,6 @@ export function initSearch(input, pop, results) {
   input.addEventListener('blur', () => setTimeout(close, 0));
   document.addEventListener('keydown', (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-    if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey) { e.preventDefault(); input.focus(); }
+    if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey) { e.preventDefault(); (input.offsetParent ? input : document.querySelector('#homeQ') || input).focus(); }  // the picker has its own box
   });
 }

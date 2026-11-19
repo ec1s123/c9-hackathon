@@ -18,7 +18,11 @@ export const circuitOf = (event) => event.split(' - ')[0];
 export function prepLeague(L, index) {
   const byId = new Map(index.teams.map((t) => [t.id, t]));
   L.teamInfo = L.teams.map((id) => byId.get(id) || { id, name: id, events: [] });
-  L.circuits = [...new Set(L.events.map(circuitOf))].sort();
+  // The franchised league and international events first (most-played first), then the regional circuits A-Z.
+  const tier = (c) => (c.startsWith('Game Changers') ? 1 : 0);
+  const played = new Map();
+  for (const r of L.trows) { const c = circuitOf(L.events[r[3]]); played.set(c, (played.get(c) || 0) + r[4]); }
+  L.circuits = [...new Set(L.events.map(circuitOf))].sort((a, b) => tier(a) - tier(b) || (tier(a) ? a.localeCompare(b) : played.get(b) - played.get(a)));
   // One search entry per player per team they appeared for.
   const m = new Map();
   for (const r of L.rows) {
@@ -49,8 +53,48 @@ export function cleanLeagueFilters(L, f) {
   }
 }
 
+/** Event indexes a competition value covers: 'all' -> null, 'c:<circuit>', 'e:<event>'. */
+export function eventSet(L, comp) {
+  if (comp === 'all') return null;
+  const name = comp.slice(2), circuit = comp.startsWith('c:');
+  return new Set(L.events.map((e, i) => [e, i]).filter(([e]) => (circuit ? circuitOf(e) === name : e === name)).map(([, i]) => i));
+}
+
+/** Every team that played in a competition, with its Operator headline and who takes it most. */
+export function pickerTeams(L, comp) {
+  const evOK = eventSet(L, comp);
+  const m = new Map();
+  for (const r of L.trows) {
+    if (evOK && !evOK.has(r[3])) continue;
+    let t = m.get(r[0]);
+    if (!t) m.set(r[0], t = { info: L.teamInfo[r[0]], tr: 0, trOp: 0, opr: 0, games: 0, circ: new Map(), who: new Map() });
+    t.tr += r[4]; t.trOp += r[5];
+    const c = circuitOf(L.events[r[3]]);
+    t.circ.set(c, (t.circ.get(c) || 0) + r[4]);
+  }
+  for (const r of L.tgames || []) { const t = m.get(r[0]); if (t && (!evOK || evOK.has(r[1]))) t.games += r[2]; }
+  for (const r of L.rows) {
+    if (!r[7] || (evOK && !evOK.has(r[E]))) continue;
+    const t = m.get(r[T]);
+    if (!t) continue;
+    t.opr += r[7];
+    let w = t.who.get(r[P]);
+    if (!w) t.who.set(r[P], w = { p: r[P], opr: 0, ag: new Map() });
+    w.opr += r[7];
+    w.ag.set(r[A], (w.ag.get(r[A]) || 0) + r[7]);
+  }
+  return [...m.values()].map((t) => {
+    const top = [...t.who.values()].sort((a, b) => b.opr - a.opr)[0];
+    return {
+      ...t,
+      circuit: [...t.circ].sort((a, b) => b[1] - a[1])[0][0],      // where they played most
+      top: top ? { pid: L.players[top.p].id, name: L.players[top.p].name, opr: top.opr, agent: L.agents[[...top.ag].sort((a, b) => b[1] - a[1])[0][0]] } : null,
+    };
+  });
+}
+
 function aggregate(L, f) {
-  const evOK = f.comp === 'all' ? null : new Set(L.events.map((e, i) => [e, i]).filter(([e]) => (f.comp.startsWith('c:') ? circuitOf(e) === f.comp.slice(2) : e === f.comp.slice(2))).map(([, i]) => i));
+  const evOK = eventSet(L, f.comp);
   const side = f.side === 'all' ? -1 : (f.side === 'd' ? 1 : 0);
   const mi = f.map === 'all' ? -1 : L.maps.indexOf(f.map);
   const ai = f.agent === 'all' ? -1 : L.agents.indexOf(f.agent);

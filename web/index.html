@@ -9,13 +9,17 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="./" id="home" title="All teams">
+  <a class="brand" href="./" id="home" title="Pick a team">
     <span id="brandIcon" class="brand-icon"></span>
     <span>
       <h1>Operator Tracker</h1>
       <p id="corpus" class="muted"></p>
     </span>
   </a>
+  <nav class="nav" id="nav" aria-label="Pages">
+    <button data-nav="home">Teams</button>
+    <button data-nav="league">League stats</button>
+  </nav>
   <div class="search">
     <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M13 13l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     <input id="q" type="search" placeholder="Search a team, player, agent or map" autocomplete="off" spellcheck="false"

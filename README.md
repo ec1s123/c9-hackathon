@@ -21,20 +21,32 @@ or one level further up). Otherwise pass `--data-dir` or set `STL_DATA_DIR`.
 `data/` is git-ignored and must stay that way: it is derived from licensed data.
 The server binds to localhost only for the same reason.
 
-## Finding what you are after
+## How you move through it
 
-The page opens on the league view: who is using the Operator across all 160
-teams, on which agents, on which maps, and which teams have one out most. Filter
-it by competition, map, side and agent, re-sort the player table by clicking a
-column, and click any player, agent, map or team to drill in.
+1. **Pick who you are playing.** The first screen is a team picker: big team
+   cards grouped by competition, each showing how often that team has an
+   Operator out and who takes it most. Narrow it with the competition and event
+   chips, or just type a team or player name and press Enter.
+2. **See who has the Operator.** The team page opens on one card per player who
+   has held it, with their share of the team's Operator rounds, kills a round,
+   how often they buy it when they can afford it, and the agents and maps they
+   use it on. Below that are the team's headline numbers and its common spots.
+3. **Drill into a player.** Click a player (card, or the roster strip in the
+   header) for their profile: which agents, which maps and sides, where they set
+   up, where the kills come from, where shots hit without a kill and where they
+   die holding it. Clicking a spot opens it on the Positions map; the "Dig into"
+   buttons lead to the other tabs. Back steps out one level at a time.
 
-The search box (press `/`) finds a team, a player, an agent or a map. Picking a
-player opens their team already filtered to them; picking an agent or map
-filters the league view.
-
-On a team page the header always says what you are looking at: the team's logo,
-a roster strip (click a player to filter to them), and a "Showing ..." line with
-one removable chip per active filter.
+The team header has two labelled rows that apply to every tab: **Who** (the
+whole team or one player) and **Where** (all maps or one map, as tiles with the
+minimap). The counts on each chip follow the other choice, so picking Haven
+shows each player's Haven numbers. Every tab then opens with a headline such as
+"OXY on Haven" and how many Operator rounds are behind it; with the whole team
+selected it lists each contributing player so you can isolate one. Positions
+always draws a single map: if none is picked it shows the one with the most
+Operator rounds and marks that tile "shown below". The search box on team pages (press `/`) jumps to another team,
+player, agent or map. "League stats" in the top bar is the all-teams view:
+which agents carry the Operator, on which maps, and a sortable player table.
 
 ## What each team tab answers
 
@@ -47,10 +59,11 @@ one removable chip per active filter.
 | Economy | Buy rate when they have $4,700+, by money, side, score, previous round and whether they just lost one. What they buy instead. Bought vs carried over vs given by a teammate. |
 | Rounds | Every Operator round, with a replay of the path and a timeline. |
 
-Filters (player, map, side, agent, event, opponent, how the Op was acquired)
-apply to every tab. The address bar always reflects the current view, so any
+Who and Where, plus the filter bar (side, agent, event, opponent, how the Op
+was acquired), apply to every tab. The address bar always reflects the current view, so any
 page can be bookmarked or shared and back/forward work:
-`/web/?team=79&tab=map&map=haven&side=d`, `/web/?agent=chamber&side=d`.
+`/web/?team=79&tab=map&map=haven&side=d`, `/web/?comp=c:VCT Americas`,
+`/web/?view=league&agent=chamber&side=d`.
 
 ## How the numbers are derived
 
@@ -70,6 +83,8 @@ The feed has no purchase events and no weapon-pickup events, so:
   player is sampled whenever anyone uses an ability, deals damage or gets a
   kill. Roughly one sample every 1 to 3 seconds, uneven. Paths between samples
   are straight lines and can cut through walls.
+- **Hits without the kill**: Operator shots that dealt damage but did not
+  kill. This is the nearest thing to a "missed kill" the data has.
 - **Shots**: only shots that hit are recorded. There is no way to see a missed
   shot or a peek that found nobody, so "when they peek" is approximated by when
   their shots land and when they take damage.
@@ -89,7 +104,9 @@ etl/fetch_assets.py  agent, ability and weapon icons from valorant-api.com,
                    team logos from vlr.gg (exact name matches only)
 web/               no-build front end (ES modules, canvas, SVG)
   app.js           team tabs, header, filters, routing
-  league.js        league view (reads data/league.json)
+  home.js          team picker (first screen)
+  league.js        league stats view and the roll-ups behind the picker
+                   (both read data/league.json)
   search.js        search box behaviour
   icons.js         logos and icons, with monogram fallbacks
 serve.py           local static server

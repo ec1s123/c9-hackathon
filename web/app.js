@@ -2,7 +2,8 @@
 import { barChart, barList, legend, tile } from './charts.js';
 import { MapView, zoneOf } from './map.js';
 import { setAssets, teamLogo, agentIcon, agentTag, agentName, abilityIcon, abilityName, weaponIcon, opIcon } from './icons.js';
-import { prepLeague, cleanLeagueFilters, describeLeague, leagueFilters, viewLeague } from './league.js';
+import { prepLeague, cleanLeagueFilters, describeLeague, leagueFilters, viewLeague, circuitOf } from './league.js';
+import { homeHero, homeGrid } from './home.js';
 import { initSearch } from './search.js';
 
 const DATA = '../data/';
@@ -12,7 +13,9 @@ const SIDE = { a: 'Attack', d: 'Defense' };
 
 const S = {
   index: null, maps: {}, T: null, tab: 'overview',
-  mode: 'league',            // 'league' = every team, 'team' = one team's tabs
+  mode: 'home',              // 'home' = team picker, 'team' = one team's tabs, 'league' = league-wide stats
+  hf: { comp: 'all' },       // picker: competition
+  hv: { q: '', sort: 'az' },
   L: null, hasAssets: false, push: false,
   f: { player: 'all', map: 'all', side: 'all', agent: 'all', event: 'all', opp: 'all', src: 'all' },
   lf: { comp: 'all', map: 'all', side: 'all', agent: 'all' },
@@ -77,7 +80,10 @@ async function loadTeam(id) {
 }
 
 // ---------------------------------------------------------------- filters
-const gameOK = (g) => (S.f.map === 'all' || g.map === S.f.map) && (S.f.event === 'all' || g.event === S.f.event) && (S.f.opp === 'all' || g.oppId === S.f.opp);
+// event filter: 'all', one event, or 'c:<circuit>' for everything in a competition
+const eventOK = (g) => S.f.event === 'all' || g.event === S.f.event || (S.f.event.startsWith('c:') && circuitOf(g.event) === S.f.event.slice(2));
+const eventLabel = (v) => (v.startsWith('c:') ? `${v.slice(2)} · all events` : v);
+const gameOK = (g) => (S.f.map === 'all' || g.map === S.f.map) && eventOK(g) && (S.f.opp === 'all' || g.oppId === S.f.opp);
 const roundOK = (r) => gameOK(r.g) && (S.f.side === 'all' || r.side === S.f.side);
 const rowOK = (x) => roundOK(x.r) && (S.f.player === 'all' || x.pi === +S.f.player) && (S.f.agent === 'all' || x.agent === S.f.agent);
 const isOp = (x) => (S.f.src === 'all' ? x.op1 === 1 : x.src === S.f.src);
@@ -107,7 +113,7 @@ function cleanTeamFilters() {
   if (f.map !== 'all' && !T.games.some((g) => g.map === f.map)) f.map = 'all';
   if (!['all', 'a', 'd'].includes(f.side)) f.side = 'all';
   if (f.agent !== 'all' && !T.rows.some((x) => x.agent === f.agent)) f.agent = 'all';
-  if (f.event !== 'all' && !T.games.some((g) => g.event === f.event)) f.event = 'all';
+  if (f.event !== 'all' && !T.games.some((g) => g.event === f.event || (f.event.startsWith('c:') && circuitOf(g.event) === f.event.slice(2)))) f.event = 'all';
   if (f.opp !== 'all' && !T.games.some((g) => g.oppId === f.opp)) f.opp = 'all';
   if (f.src !== 'all' && !SRC[f.src]) f.src = 'all';
 }
@@ -116,8 +122,8 @@ function teamFilters() {
   const T = S.T, f = S.f;
   const sel = (v, cur) => (String(v) === String(cur) ? ' selected' : '');
   const opts = (key, all, items) => `<select data-f="${key}"><option value="all">${all}</option>${items.map(([v, l]) => `<option value="${esc(v)}"${sel(v, f[key])}>${esc(l)}</option>`).join('')}</select>`;
-  const maps = [...new Set(T.games.map((g) => g.map))].sort().map((m) => [m, `${cap(m)} (${T.games.filter((g) => g.map === m).length} games)`]);
-  const events = [...new Set(T.games.map((g) => g.event))].map((e) => [e, e]);
+  const circuits = [...new Set(T.games.map((g) => circuitOf(g.event)))];
+  const events = [...(circuits.length > 1 ? circuits.map((c) => ['c:' + c, eventLabel('c:' + c)]) : []), ...[...new Set(T.games.map((g) => g.event))].map((e) => [e, e])];
   const opps = [...new Map(T.games.map((g) => [g.oppId, g.opp]))].sort((a, b) => a[1].localeCompare(b[1]));
   // Agents this team (or the chosen player) has actually held the Operator on.
   const byA = new Map();
@@ -128,8 +134,7 @@ function teamFilters() {
     ? `<button data-f="agent" data-v="all" class="txt ${f.agent === 'all' ? 'on' : ''}">All</button>` + agents.map(([a, c]) => `<button data-f="agent" data-v="${esc(a)}" class="${f.agent === a ? 'on' : ''}" aria-label="${esc(agentName(a))}" aria-pressed="${f.agent === a}" data-tip="${esc(`<b>${esc(agentName(a))}</b><span class="muted">${c} Operator round${c === 1 ? '' : 's'}</span>`)}">${agentIcon(a, 'md')}</button>`).join('')
     : '<span class="muted none">No Operator rounds</span>';
   const side = [['all', 'Both'], ['a', 'Attack'], ['d', 'Defense']].map(([v, l]) => `<button data-f="side" data-v="${v}" class="${f.side === v ? 'on' : ''}">${l}</button>`).join('');
-  return `<label class="field"><span>Map</span>${opts('map', 'All maps', maps)}</label>
-    <div class="field"><span>Side</span><div class="seg" role="group" aria-label="Side">${side}</div></div>
+  return `<div class="field"><span>Side</span><div class="seg" role="group" aria-label="Side">${side}</div></div>
     <div class="field"><span>Agent on the Op</span><div class="icoseg" role="group" aria-label="Agent">${agentBtns}</div></div>
     <label class="field"><span>Event</span>${opts('event', 'All events', events)}</label>
     <label class="field"><span>Opponent</span>${opts('opp', 'All opponents', opps)}</label>
@@ -145,44 +150,99 @@ const assetHint = () => (S.hasAssets ? '' : '<p class="note">Logos and agent ico
 function leagueHero() {
   const L = S.L, parts = describeLeague(L, S.lf);
   const chips = parts.map(([k, html, trusted]) => chip(k, trusted ? html : esc(html))).join('');
-  return `<div class="hero-id"><span class="hero-op">${opIcon('lg')}</span><div><h2>Who is using the Operator</h2>
-      <p class="muted">${L.teams.length} teams · ${L.players.length} players · ${S.index.games.toLocaleString()} maps. Search for a team or player above, or narrow it down here and click anything to open it.</p></div></div>
+  return `<div class="hero-id"><span class="hero-op">${opIcon('lg')}</span><div><h2>League stats: who is using the Operator</h2>
+      <p class="muted">Every team together: ${L.teams.length} teams · ${L.players.length} players · ${S.index.games.toLocaleString()} maps. Narrow it down below and click any player or team to open it.</p></div></div>
     <p class="scope">${chips ? `<span class="muted">Showing</span> ${chips}` : '<span><span class="muted">Showing</span> <b>every team</b><span class="muted">, all competitions, maps and agents</span></span>'}</p>${assetHint()}`;
 }
+
+/** Operator rows under every active filter except one, for the counts on that filter's own buttons. */
+function opRowsWithout(key) {
+  const keep = S.f[key];
+  S.f[key] = 'all';
+  const r = S.T.rows.filter((x) => rowOK(x) && isOp(x));
+  S.f[key] = keep;
+  return r;
+}
+const tally = (xs, fn) => { const m = new Map(); xs.forEach((x) => { const k = fn(x); m.set(k, (m.get(k) || 0) + 1); }); return m; };
+const topKey = (m) => ([...m].sort((a, b) => b[1] - a[1])[0] || [''])[0];
+const mapThumb = (m) => (S.maps[m] ? `<img class="ico mapthumb" src="${DATA}${esc(S.maps[m].img)}" alt="">` : '');
 
 function teamHero() {
   const T = S.T, f = S.f;
   const info = S.index.teams.find((t) => t.id === T.team.id) || { events: [] };
   const wins = sum(T.games, (g) => g.won);
-  // roster: Operator rounds per player and the agent they most often hold it on
-  const stat = T.players.map(() => ({ n: 0, ag: new Map(), played: new Map() }));
   const heldRows = T.rows.filter((x) => x.op1);
-  heldRows.forEach((x) => { const s = stat[x.pi]; s.n++; s.ag.set(x.agent, (s.ag.get(x.agent) || 0) + 1); });
-  T.games.forEach((g) => Object.entries(g.agents).forEach(([pi, a]) => stat[pi].played.set(a, (stat[pi].played.get(a) || 0) + 1)));
-  const top = (m) => ([...m].sort((a, b) => b[1] - a[1])[0] || [''])[0];
-  const order = T.players.map((p, i) => i).sort((a, b) => stat[b].n - stat[a].n);
-  const roster = `<button class="pchip txt ${f.player === 'all' ? 'on' : ''}" data-player="all" aria-pressed="${f.player === 'all'}">Whole team</button>` + order.map((i) => {
-    const s = stat[i], on = String(f.player) === String(i);
-    return `<button class="pchip ${on ? 'on' : ''} ${s.n ? '' : 'idle'}" data-player="${i}" aria-pressed="${on}">${agentIcon(top(s.ag) || top(s.played), 'md')}<span class="nm">${esc(T.players[i].name)}</span><span class="ct">${s.n} Op</span></button>`;
+
+  // WHO: one chip per player, counted under the other filters (so on Haven it shows Haven numbers)
+  const total = tally(heldRows, (x) => x.pi);                       // overall, keeps the order stable
+  const now = opRowsWithout('player');
+  const nowN = tally(now, (x) => x.pi);
+  const order = T.players.map((p, i) => i).sort((a, b) => (total.get(b) || 0) - (total.get(a) || 0));
+  const agentOf = (i) => topKey(tally(now.filter((x) => x.pi === i), (x) => x.agent)) || topKey(tally(heldRows.filter((x) => x.pi === i), (x) => x.agent))
+    || topKey(tally(T.games.filter((g) => g.agents[i]), (g) => g.agents[i]));
+  const roster = `<button class="pchip txt ${f.player === 'all' ? 'on' : ''}" data-player="all" aria-pressed="${f.player === 'all'}">Whole team<span class="ct">${now.length} Op</span></button>` + order.map((i) => {
+    const n = nowN.get(i) || 0, on = String(f.player) === String(i);
+    return `<button class="pchip ${on ? 'on' : ''} ${n ? '' : 'idle'}" data-player="${i}" aria-pressed="${on}">${agentIcon(agentOf(i), 'md')}<span class="nm">${esc(T.players[i].name)}</span><span class="ct">${n} Op</span></button>`;
   }).join('');
 
-  const chips = [];
-  if (f.player !== 'all') chips.push(chip('player', esc(T.players[+f.player].name)));
-  if (f.agent !== 'all') chips.push(chip('agent', `${agentIcon(f.agent)}${esc(agentName(f.agent))}`));
-  if (f.map !== 'all') chips.push(chip('map', cap(f.map)));
-  if (f.side !== 'all') chips.push(chip('side', SIDE[f.side]));
-  if (f.event !== 'all') chips.push(chip('event', esc(f.event)));
-  if (f.opp !== 'all') { const g = T.games.find((x) => x.oppId === f.opp); chips.push(chip('opp', `vs ${teamLogo(f.opp, g ? g.opp : '')}${esc(g ? g.opp : '')}`)); }
-  if (f.src !== 'all') chips.push(chip('src', SRC[f.src]));
-  const c = ctx();
-  const crumbs = `<nav class="crumbs" aria-label="Breadcrumb">${S.L ? '<button data-go="league">All teams</button><span>›</span>' : ''}${f.player === 'all' ? `<b>${esc(T.team.name)}</b>` : `<button data-go="team">${esc(T.team.name)}</button><span>›</span><b>${esc(T.players[+f.player].name)}</b>`}</nav>`;
+  // WHERE: one tile per map the team has played
+  const totalM = tally(heldRows, (x) => x.g.map);
+  const nowM = opRowsWithout('map');
+  const nowMN = tally(nowM, (x) => x.g.map);
+  const games = tally(T.games, (g) => g.map);
+  const maps = [...games.keys()].sort((a, b) => (totalM.get(b) || 0) - (totalM.get(a) || 0) || a.localeCompare(b));
+  const tiles = `<button class="mtile txt ${f.map === 'all' ? 'on' : ''}" data-map="all" aria-pressed="${f.map === 'all'}"><span class="st"><span class="nm">All maps</span><span class="ct">${nowM.length} Op</span></span></button>` + maps.map((m) => {
+    const n = nowMN.get(m) || 0, on = f.map === m, shown = f.map === 'all' && S.shownMap === m;
+    const tip = `<b>${cap(m)}</b><span class="muted">${games.get(m)} game${games.get(m) === 1 ? '' : 's'} played · ${n} Operator round${n === 1 ? '' : 's'}${f.player === 'all' ? '' : ` for ${esc(T.players[+f.player].name)}`}</span>`;
+    return `<button class="mtile ${on ? 'on' : ''} ${shown ? 'shown' : ''} ${n ? '' : 'idle'}" data-map="${esc(m)}" aria-pressed="${on}" data-tip="${esc(tip)}">${mapThumb(m)}<span class="st"><span class="nm">${cap(m)}</span><span class="ct">${shown ? 'shown below' : `${n} Op`}</span></span></button>`;
+  }).join('');
+
+  const crumbs = `<nav class="crumbs" aria-label="Breadcrumb">${S.L ? '<button data-go="home">All teams</button><span>›</span>' : ''}${f.player === 'all' ? `<b>${esc(T.team.name)}</b>` : `<button data-go="team">${esc(T.team.name)}</button><span>›</span><b>${esc(T.players[+f.player].name)}</b>`}</nav>`;
   return `${crumbs}
-    <div class="hero-id">${teamLogo(T.team.id, T.team.name, 'xl')}<div><h2>${esc(T.team.name)}</h2>
+    <div class="hero-id">${teamLogo(T.team.id, T.team.name, 'lg')}<div><h2>${esc(T.team.name)}</h2>
       <p class="muted">${esc(info.events.join(', '))} · ${T.games.length} maps, ${wins} won · ${monthYear(info.first)} to ${monthYear(info.last)}</p></div>
       <div class="hero-stats"><span class="pill">${opIcon()}<b>${heldRows.length}</b> Operator rounds</span><span class="pill"><b>${sum(heldRows, (x) => x.ok)}</b> Operator kills</span></div></div>
-    <div class="roster" role="group" aria-label="Player">${roster}</div>
-    <p class="scope">${chips.length ? `<span class="muted">Showing</span> ${chips.join('')}` : '<span><span class="muted">Showing</span> <b>the whole team</b><span class="muted">, every map and event</span></span>'}
-      <span class="muted">· ${c.opRows.length} Operator round${c.opRows.length === 1 ? '' : 's'} in ${c.rounds.length.toLocaleString()} rounds played</span></p>${assetHint()}`;
+    <div class="pickrow" role="group" aria-label="Player"><span class="lbl">Who</span><div class="roster">${roster}</div></div>
+    <div class="pickrow" role="group" aria-label="Map"><span class="lbl">Where</span><div class="roster">${tiles}</div></div>${assetHint()}`;
+}
+
+// The headline on every tab: who you are looking at, and where.
+const TAB_NAMES = { map: 'Positions', timing: 'Timing', rotations: 'Rotations', economy: 'Economy', rounds: 'Rounds' };
+function ctxTitle(kicker, ops, mk) {
+  const T = S.T, f = S.f, solo = f.player !== 'all';
+  const map = mk || (f.map !== 'all' ? f.map : null);
+  const ranked = (fn) => [...tally(ops, fn)].sort((a, b) => b[1] - a[1]);
+  const byP = ranked((o) => o.p), byA = ranked((o) => o.row.agent);
+  const name = solo ? T.players[+f.player].name : T.team.name;
+  const whoHtml = solo ? `${agentIcon((byA[0] || [''])[0], 'lg')}<span>${esc(name)}</span>` : `${teamLogo(T.team.id, T.team.name, 'lg')}<span>${esc(name)}</span>`;
+  const whereHtml = map ? `${mapThumb(map)}<span>${cap(map)}</span>` : '<span>all maps</span>';
+  const extra = [f.side !== 'all' ? `${SIDE[f.side].toLowerCase()} only` : '', f.agent !== 'all' ? `on ${esc(agentName(f.agent))}` : '', f.src !== 'all' ? esc(SRC[f.src].toLowerCase()) : '',
+    f.event !== 'all' ? esc(eventLabel(f.event)) : '', f.opp !== 'all' ? `vs ${esc((T.games.find((g) => g.oppId === f.opp) || {}).opp || '')}` : ''].filter(Boolean).join(' · ');
+  const n = ops.length, s = (k) => (k === 1 ? '' : 's');
+  // The header counts rounds that left the buy phase with an Operator; the map also draws mid-round pickups.
+  const split = (list) => { const held = list.filter((o) => o.row.op1).length; return [f.src === 'all' ? held : list.length, f.src === 'all' ? list.length - held : 0]; };
+  const [held, picked] = split(ops);
+  const plus = (k) => (k ? ` <span class="low" title="Operator picked up mid-round">+${k} picked up</span>` : '');
+  let sub;
+  if (!n) sub = `No Operator rounds ${map ? `on ${cap(map)}` : 'in this selection'}${solo ? ` for ${esc(name)}` : ''}. Pick another ${solo ? 'player or ' : ''}map above.`;
+  else if (solo) {
+    const sides = f.side === 'all' ? `<span>${ops.filter((o) => o.round.side === 'd').length} on defense · ${ops.filter((o) => o.round.side === 'a').length} on attack</span>` : '';
+    sub = `<span><b>${held}</b> Operator round${s(held)}${plus(picked)}</span>${sides}${byA.map(([a, c]) => `<span class="tag">${agentIcon(a)}${esc(agentName(a))} ${c}</span>`).join('')}`;
+  } else {
+    const btn = ([p, c]) => `<button class="who-btn" data-player="${p}">${agentIcon(topKey(tally(ops.filter((o) => o.p === p), (o) => o.row.agent)))}<b>${esc(T.players[p].name)}</b><span class="ct">${split(ops.filter((o) => o.p === p))[0]}${plus(split(ops.filter((o) => o.p === p))[1])}</span></button>`;
+    sub = `<span><b>${held}</b> Operator round${s(held)}${plus(picked)} from ${byP.length} player${s(byP.length)}:</span>${byP.map(btn).join('')}<span class="muted">${byP.length > 1 ? 'Everyone is on the map together. Click a player to see only theirs.' : 'Click to filter to this player.'}</span>`;
+  }
+  const auto = mk && f.map === 'all' ? `<p class="ctx-note">Showing ${cap(mk)} because it has the most Operator rounds here. Pick another map under “Where” above.</p>` : '';
+  return `<div class="ctx" aria-label="${kicker}">
+    <h2 class="ctx-h">${whoHtml}<em>on</em>${whereHtml}${extra ? `<small>${extra}</small>` : ''}</h2>
+    <p class="ctx-sub">${sub}</p>${auto}</div>`;
+}
+function teamView() {
+  const body = VIEWS[S.tab]();
+  if (S.tab === 'overview') return body;
+  const { ops } = ctx();
+  const mk = S.tab === 'map' ? pickMap(ops) : null;
+  return ctxTitle(TAB_NAMES[S.tab], mk ? ops.filter((o) => o.game.map === mk) : ops, mk) + body;
 }
 
 // ---------------------------------------------------------------- shared bits
@@ -192,15 +252,9 @@ function pickMap(ops) {
   ops.forEach((o) => n.set(o.game.map, (n.get(o.game.map) || 0) + 1));
   const ranked = [...n].sort((a, b) => b[1] - a[1]);
   if (!ranked.length) return null;
-  if (!S.mapPick || !n.has(S.mapPick)) S.mapPick = ranked[0][0];
+  S.mapPick = ranked[0][0];
+  S.shownMap = S.mapPick;      // lets the header mark which map tile is on screen
   return S.mapPick;
-}
-function mapPicker(ops) {
-  if (S.f.map !== 'all') return '';
-  const n = new Map();
-  ops.forEach((o) => n.set(o.game.map, (n.get(o.game.map) || 0) + 1));
-  const opts = [...n].sort((a, b) => b[1] - a[1]).map(([m, c]) => `<option value="${m}" ${m === S.mapPick ? 'selected' : ''}>${cap(m)} (${c} Op rounds)</option>`).join('');
-  return `<label>Map <select id="mapPick">${opts}</select></label>`;
 }
 const who = (o) => `${agentIcon(o.row.agent)}${esc(S.T.players[o.p].name)} · ${esc(agentName(o.row.agent))}`;
 const where = (o) => `${o.game.date} vs ${esc(o.game.opp)} · ${cap(o.game.map)} R${o.r} ${SIDE[o.round.side] || ''}`;
@@ -214,39 +268,123 @@ function posAt(o, t) {
 const empty = (msg) => `<div class="card empty">${msg}</div>`;
 
 // ---------------------------------------------------------------- overview
+const miniBar = (f) => `<span class="mini"><i style="width:${(100 * Math.max(0, Math.min(1, f || 0))).toFixed(0)}%"></i></span>`;
+const groupBy = (xs, fn) => { const m = new Map(); xs.forEach((x) => { const k = fn(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }); return m; };
+
+/** Areas ranked by what happens there. Counts match the markers on the Positions map. */
+function spotCards(ops) {
+  const lists = { setup: new Map(), kills: new Map(), hits: new Map(), deaths: new Map() };
+  const add = (m, o, x, y) => { const z = zone(o, x, y); if (!z) return; const k = `${o.game.map}|${z}`; m.set(k, (m.get(k) || 0) + 1); };
+  ops.forEach((o) => {
+    if (o.pts.length) add(lists.setup, o, o.pts[0].x, o.pts[0].y);
+    o.kills.forEach((k) => { if (k[1] === 'operator') add(lists.kills, o, k[2], k[3]); });
+    o.hits.forEach((h) => { if (!h[7]) add(lists.hits, o, h[1], h[2]); });
+    if (o.death) add(lists.deaths, o, o.death[1], o.death[2]);
+  });
+  if (!Object.values(lists).some((m) => m.size)) return '';
+  const card = (key, title, sub) => {
+    const all = [...lists[key]].sort((a, b) => b[1] - a[1]);
+    const total = sum(all, (e) => e[1]);
+    const rows = all.slice(0, 6).map(([k, n]) => { const [m, z] = k.split('|'); return `<tr class="click" data-spot="${esc(m)}" data-layer="${key}"><td>${esc(z)}</td><td class="low">${cap(m)}</td><td class="num">${n} <span class="low">${pct(n, total)}</span></td></tr>`; }).join('');
+    return `<div class="card"><h2>${title}</h2><p class="sub">${sub}</p>${rows ? `<table><tbody>${rows}</tbody></table>` : '<p class="muted">None in this selection.</p>'}</div>`;
+  };
+  return `<div><div class="grid-head"><h2>Common spots</h2><span class="muted">Most frequent areas${S.f.map === 'all' ? ' across all maps' : ` on ${cap(S.f.map)}`}. Click one to open it on the map.</span></div>
+    <div class="grid g4">
+      ${card('setup', 'Sets up at', 'Position when the barriers drop.')}
+      ${card('kills', 'Gets Operator kills from', 'Where the shooter was standing.')}
+      ${card('hits', 'Hits without the kill from', 'Shots that connected but did not kill. Clean misses are not in the data.')}
+      ${card('deaths', 'Dies holding it at', 'Where the Operator holder was killed.')}
+    </div></div>`;
+}
+
 function viewOverview() {
   const { T, rows, rounds, opRows, ops } = ctx();
   if (!rows.length) return empty('No rounds match these filters.');
   const b = baseline();
+  const cost = S.index.opCost;
   const opRecs = ops.filter((o) => isOp(o.row));
   const opRoundIds = new Set(opRows.map((x) => x.r));
   const withOp = rounds.filter((r) => opRoundIds.has(r));
   const without = rounds.filter((r) => !opRoundIds.has(r));
-  const afford = rows.filter((x) => !x.op0 && x.m0 >= S.index.opCost);
+  const canBuy = (xs) => xs.filter((x) => !x.op0 && x.m0 >= cost);
+  const afford = canBuy(rows);
   const bought = afford.filter((x) => x.src === 'bought');
   const opKills = sum(opRows, (x) => x.ok);
   const fk = opRecs.filter((o) => o.kills.some((k) => k[7] && k[1] === 'operator')).length;
   const fd = opRecs.filter((o) => o.death && o.death[7]).length;
   const cmp = (txt) => (whole() ? `League avg ${txt}` : '');
-  const tiles = [
+  const tiles = `<div class="grid tiles">${[
     tile('Rounds with an Operator', pct(withOp.length, rounds.length), `${withOp.length} of ${rounds.length} rounds`, cmp(pct(b.trOp, b.tr))),
     tile('Buys it when affordable', pct(bought.length, afford.length), `${bought.length} of ${afford.length} player-rounds with $4,700+`, cmp(pct(b.buy, b.opp, 1) + ' per player-round')),
     tile('Operator kills per Op round', num(opKills / opRows.length), `${opKills} kills in ${opRows.length} Op rounds`, cmp(num(b.opKills / b.opr))),
     tile('Opening kill with the Op', pct(fk, opRows.length), `${fk} first bloods · dies first in ${pct(fd, opRows.length)}`, cmp(`${pct(b.opFk, b.opr)} · dies first ${pct(b.opFd, b.opr)}`)),
     tile('Op holder dies', pct(sum(opRows, (x) => x.d), opRows.length), `keeps the Op to round end in ${pct(sum(opRows, (x) => x.ope), opRows.length)}`, cmp(`${pct(b.opDeaths, b.opr)} die · ${pct(b.opSaved, b.opr)} keep`)),
     tile('Round win rate with an Op', pct(sum(withOp, (r) => r.won), withOp.length), `${pct(sum(without, (r) => r.won), without.length)} without one`, cmp(`${pct(b.winOp, b.trOp)} with · ${pct(b.winNoOp, b.tr - b.trOp)} without`)),
-  ].join('');
+  ].join('')}</div>`;
+  const ranked = (m) => [...m].sort((a, c) => c[1].length - a[1].length);
 
-  // players
-  const byP = new Map();
-  rows.forEach((x) => { if (!byP.has(x.pi)) byP.set(x.pi, []); byP.get(x.pi).push(x); });
-  const prow = [...byP].map(([pi, xs]) => {
-    const ops = xs.filter(isOp), aff = xs.filter((x) => !x.op0 && x.m0 >= S.index.opCost);
-    const ag = new Map(); ops.forEach((x) => ag.set(x.agent, (ag.get(x.agent) || 0) + 1));
-    return { pi, n: xs.length, ops: ops.length, aff: aff.length, buy: aff.filter((x) => x.src === 'bought').length, ok: sum(ops, (x) => x.ok), d: sum(ops, (x) => x.d), ope: sum(ops, (x) => x.ope), agents: [...ag].sort((a, c) => c[1] - a[1]).slice(0, 4).map(([a, c]) => `<span class="tag">${agentIcon(a)}<span class="low">${c}</span></span>`).join('') };
-  }).sort((a, c) => c.ops - a.ops);
-  const ptable = `<table><thead><tr><th>Player</th><th>Agents on the Op</th><th class="num">Rounds</th><th class="num">Op rounds</th><th class="num">Op %</th><th class="num">Buys when affordable</th><th class="num">Op kills</th><th class="num">Kills / Op round</th><th class="num">Dies with it</th><th class="num">Keeps it</th></tr></thead><tbody>` +
-    prow.map((p) => `<tr class="click" data-player="${p.pi}"><td><b>${esc(T.players[p.pi].name)}</b></td><td><span class="tags">${p.agents || '<span class="low">–</span>'}</span></td><td class="num">${p.n}</td><td class="num">${p.ops}</td><td class="num">${pct(p.ops, p.n)}</td><td class="num">${pct(p.buy, p.aff)} <span class="low">${p.buy}/${p.aff}</span></td><td class="num">${p.ok}</td><td class="num">${p.ops ? num(p.ok / p.ops) : '–'}</td><td class="num">${pct(p.d, p.ops)}</td><td class="num">${pct(p.ope, p.ops)}</td></tr>`).join('') + '</tbody></table>';
+  // ------------------------------------------------ one player: their Operator profile
+  if (S.f.player !== 'all') {
+    const me = T.players[+S.f.player].name;
+    const teamOp = T.rows.filter((x) => roundOK(x.r) && isOp(x)).length;   // same maps, side and events, any player
+    const topAgent = (ranked(groupBy(opRows, (x) => x.agent))[0] || ranked(groupBy(rows, (x) => x.agent))[0] || [''])[0];
+    const line = opRows.length
+      ? `<b>${opRows.length}</b> of ${esc(T.team.name)}'s ${teamOp} Operator rounds (${pct(opRows.length, teamOp)}) · has one in <b>${pct(opRows.length, rows.length)}</b> of ${rows.length.toLocaleString()} rounds played · buys it <b>${pct(bought.length, afford.length)}</b> of the time it is affordable (${bought.length}/${afford.length}) · <b>${num(opKills / opRows.length)}</b> Operator kills a round`
+      : `No Operator rounds in this selection (${rows.length.toLocaleString()} rounds played).`;
+    const jump = [['map', 'Positions and kill spots'], ['timing', 'When the shots land'], ['rotations', 'Where they go after a kill'], ['economy', 'When they buy it'], ['rounds', 'Round-by-round replays']]
+      .map(([t, l]) => `<button class="jump" data-jump="${t}">${l}<span aria-hidden="true">→</span></button>`).join('');
+    const profile = `<div class="card profile"><div class="hero-id">${agentIcon(topAgent, 'lg')}<div><h2>${esc(me)} on the Operator</h2><p class="lede">${line}</p></div></div>
+      ${opRows.length ? `<div class="jumps"><span class="muted">Dig into</span>${jump}</div>` : ''}</div>`;
+
+    const agents = ranked(groupBy(rows, (x) => x.agent)).map(([a, xs]) => { const o = xs.filter(isOp); return { a, n: xs.length, op: o.length, ok: sum(o, (x) => x.ok) }; }).sort((x, y) => y.op - x.op || y.n - x.n);
+    const maxA = Math.max(1, ...agents.map((e) => e.op));
+    const atable = `<table><thead><tr><th>Agent</th><th class="num">Rounds</th><th class="num">Op rounds</th><th class="num">Has it in</th><th class="num">Op kills</th><th class="num">Kills / rd</th></tr></thead><tbody>${agents.map((e) => `<tr class="click ${S.f.agent === e.a ? 'sel' : ''}" data-agent="${esc(e.a)}"><td>${agentTag(e.a)}</td><td class="num">${e.n}</td><td class="num">${e.op} ${miniBar(e.op / maxA)}</td><td class="num">${pct(e.op, e.n)}</td><td class="num">${e.ok}</td><td class="num">${e.op ? num(e.ok / e.op) : '–'}</td></tr>`).join('')}</tbody></table>`;
+
+    const maps = ranked(groupBy(rows, (x) => x.g.map)).map(([m, xs]) => {
+      const o = xs.filter(isOp), side = (s) => { const all = xs.filter((x) => x.r.side === s); return `${all.filter(isOp).length}<span class="low">/${all.length}</span>`; };
+      return { m, n: xs.length, op: o.length, ok: sum(o, (x) => x.ok), a: side('a'), d: side('d') };
+    }).sort((x, y) => y.op - x.op || y.n - x.n);
+    const maxM = Math.max(1, ...maps.map((e) => e.op));
+    const mtable = `<table><thead><tr><th>Map</th><th class="num">Rounds</th><th class="num">Op rounds</th><th class="num">Has it in</th><th class="num">Attack</th><th class="num">Defense</th><th class="num">Op kills</th><th class="num">Kills / rd</th></tr></thead><tbody>${maps.map((e) => `<tr class="click ${S.f.map === e.m ? 'sel' : ''}" data-map="${esc(e.m)}"><td>${cap(e.m)}</td><td class="num">${e.n}</td><td class="num">${e.op} ${miniBar(e.op / maxM)}</td><td class="num">${pct(e.op, e.n)}</td><td class="num">${e.a}</td><td class="num">${e.d}</td><td class="num">${e.ok}</td><td class="num">${e.op ? num(e.ok / e.op) : '–'}</td></tr>`).join('')}</tbody></table>`;
+
+    return `<div class="grid">${profile}${tiles}
+      <div class="grid g2">
+        <div class="card"><h2>Which agents</h2><p class="sub">Agents ${esc(me)} has played, and how often the Operator comes out on each. Click an agent to filter.</p><div class="scroll">${atable}</div></div>
+        <div class="card"><h2>Which maps</h2><p class="sub">Operator rounds per map. Attack and Defense are Op rounds out of rounds played on that side; Kills / rd is Operator kills per Op round. Click a map to filter.</p><div class="scroll">${mtable}</div></div>
+      </div>
+      ${spotCards(ops)}</div>`;
+  }
+
+  // ------------------------------------------------ whole team: who has it
+  const ppl = ranked(groupBy(rows, (x) => x.pi)).map(([pi, xs]) => {
+    const o = xs.filter(isOp), a = canBuy(xs);
+    return { pi, n: xs.length, o, aff: a.length, buy: a.filter((x) => x.src === 'bought').length, ok: sum(o, (x) => x.ok), d: sum(o, (x) => x.d), ope: sum(o, (x) => x.ope) };
+  }).sort((a, c) => c.o.length - a.o.length);
+  const users = ppl.filter((p) => p.o.length), idle = ppl.filter((p) => !p.o.length);
+  const cards = users.map((p) => {
+    const name = T.players[p.pi].name, n = p.o.length;
+    const ag = ranked(groupBy(p.o, (x) => x.agent));
+    const mp = ranked(groupBy(p.o, (x) => x.g.map)).slice(0, 3).map(([m, xs]) => `${cap(m)} ${xs.length}`).join(' · ');
+    const tip = `<b>${esc(name)}</b><span class="muted">${n} Operator rounds in ${p.n} rounds played (${pct(n, p.n)})</span><span class="muted">Dies holding it in ${pct(p.d, n)} · still has it at round end in ${pct(p.ope, n)}</span>`;
+    return `<button class="pick pcard" data-player="${p.pi}" data-tip="${esc(tip)}">
+      ${agentIcon(ag[0][0], 'lg')}
+      <span class="pk-main"><b>${esc(name)}</b><small>${n} Op round${n === 1 ? '' : 's'}</small></span>
+      <span class="pk-stat"><b>${pct(n, opRows.length)}</b><small>of the team's Op rounds</small></span>
+      <span class="meter"><i style="width:${(100 * n / opRows.length).toFixed(1)}%"></i></span>
+      <span class="pk-foot">
+        <span class="kvs"><span><b>${num(p.ok / n)}</b> kills a round</span><span><b>${pct(p.buy, p.aff)}</b> buys when affordable <span class="low">${p.buy}/${p.aff}</span></span></span>
+        <span class="tags">${ag.slice(0, 4).map(([a, xs]) => `<span class="tag">${agentIcon(a)}<span class="low">${xs.length}</span></span>`).join('')}</span>
+        <span class="low">${mp}</span>
+      </span>
+    </button>`;
+  }).join('');
+  const lead = users[0];
+  const headline = lead
+    ? `<b>${esc(T.players[lead.pi].name)}</b> has had ${pct(lead.o.length, opRows.length)} of the team's Operator rounds${users.length > 1 ? `; ${users.length - 1} other player${users.length === 2 ? ' has' : 's have'} had one at least once` : ''}. Click a player to see only their Operator play.`
+    : 'Nobody had an Operator in this selection.';
+  const whoCard = `<div class="card"><h2>${opIcon()}Who has the Operator</h2><p class="sub">${headline}</p>
+    ${cards ? `<div class="picks players">${cards}</div>` : ''}
+    ${idle.length && users.length ? `<p class="note">Never had one here: ${idle.map((p) => esc(T.players[p.pi].name)).join(', ')}.</p>` : ''}</div>`;
 
   // map x side
   const ms = new Map();
@@ -263,14 +401,13 @@ function viewOverview() {
   const pa = new Map();
   opRows.forEach((x) => { const k = `${x.pi}|${x.agent}`; if (!pa.has(k)) pa.set(k, { pi: x.pi, agent: x.agent, tot: 0, m: {} }); const e = pa.get(k); e.tot++; const c = (e.m[x.g.map] ||= { n: 0, k: 0 }); c.n++; c.k += x.ok; });
   const atable = maps.length ? `<table><thead><tr><th>Player</th><th>Agent</th><th class="num">Op rounds</th>${maps.map((m) => `<th class="num">${cap(m)}</th>`).join('')}</tr></thead><tbody>` +
-    [...pa.values()].sort((a, c) => c.tot - a.tot).slice(0, 30).map((e) => `<tr><td>${esc(T.players[e.pi].name)}</td><td>${agentTag(e.agent)}</td><td class="num">${e.tot}</td>${maps.map((m) => `<td class="num">${e.m[m] ? `${e.m[m].n} <span class="low">(${e.m[m].k})</span>` : '<span class="low">·</span>'}</td>`).join('')}</tr>`).join('') + '</tbody></table>' : '<p class="muted">No Operator rounds in this selection.</p>';
+    [...pa.values()].sort((a, c) => c.tot - a.tot).slice(0, 30).map((e) => `<tr class="click" data-player="${e.pi}"><td>${esc(T.players[e.pi].name)}</td><td>${agentTag(e.agent)}</td><td class="num">${e.tot}</td>${maps.map((m) => `<td class="num">${e.m[m] ? `${e.m[m].n} <span class="low">(${e.m[m].k})</span>` : '<span class="low">·</span>'}</td>`).join('')}</tr>`).join('') + '</tbody></table>' : '<p class="muted">No Operator rounds in this selection.</p>';
 
-  return `<div class="grid tiles">${tiles}</div>
-  <div class="card"><h2>Who takes the Operator</h2><p class="sub">Click a player to filter everything to them. “Op rounds” are rounds they left the buy phase holding one.</p><div class="scroll">${ptable}</div></div>
-  <div class="grid g2" style="margin-top:14px">
-    <div class="card"><h2>By map and side</h2><p class="sub">Share of the team's rounds with at least one Operator, against the league average for that map and side.</p><div class="scroll">${mtable}</div></div>
+  return `<div class="grid">${whoCard}${tiles}${spotCards(ops)}
+  <div class="grid g2">
+    <div class="card"><h2>By map and side</h2><p class="sub">Share of the team's rounds with at least one Operator, against the league average for that map and side. Click a map to filter.</p><div class="scroll">${mtable}</div></div>
     <div class="card"><h2>Agent on the Operator, by map</h2><p class="sub">Op rounds per map, with Operator kills in brackets.</p><div class="scroll">${atable}</div></div>
-  </div>`;
+  </div></div>`;
 }
 
 // ---------------------------------------------------------------- positions
@@ -282,7 +419,7 @@ function viewMap() {
   const box = (k, label) => `<label><input type="checkbox" data-layer="${k}" ${L[k] ? 'checked' : ''}> ${label}</label>`;
   return `<div class="grid map-layout">
     <div class="card">
-      <div class="controls">${mapPicker(ops)}${box('heat', 'Time spent')}${box('setup', 'Setup spot')}${box('kills', 'Op kills')}${box('hits', 'Op hits, no kill')}${box('deaths', 'Deaths holding it')}</div>
+      <div class="controls">${box('heat', 'Time spent')}${box('setup', 'Setup spot')}${box('kills', 'Op kills')}${box('hits', 'Op hits, no kill')}${box('deaths', 'Deaths holding it')}</div>
       <div class="controls"><label>Round time from <input type="range" id="w0" min="0" max="120" step="5" value="${S.win[0]}"> <span id="w0v">${S.win[0]}s</span></label><label>to <input type="range" id="w1" min="5" max="120" step="5" value="${S.win[1]}"> <span id="w1v">${S.win[1] >= 120 ? 'end' : S.win[1] + 's'}</span></label></div>
       <div class="mapwrap"><canvas id="mapc"></canvas></div>
       ${legend([['Time spent holding the Op (brighter = longer)', C.def], ['Op kill: shooter, line to victim', C.kill, 'dot'], ['Op hit, no kill', C.kill, 'ring'], ['Died holding the Op', C.atk, 'x'], ['Position when barriers drop', null, 'sq']])}
@@ -316,7 +453,7 @@ function drawMapTab() {
 
   // zone table
   const z = new Map();
-  const get = (name) => { if (!z.has(name)) z.set(name, { name, t: 0, k: 0, d: 0, s: 0 }); return z.get(name); };
+  const get = (name) => { if (!z.has(name)) z.set(name, { name, t: 0, k: 0, h: 0, d: 0, s: 0 }); return z.get(name); };
   let total = 0;
   mine.forEach((o) => {
     const p = o.pts;
@@ -327,11 +464,12 @@ function drawMapTab() {
       if (dt > 0) { const d = Math.min(dt, 8); get(zone(o, p[i].x, p[i].y)).t += d; total += d; }
     }
     o.kills.filter((k) => k[1] === 'operator' && inWin(k[0])).forEach((k) => get(zone(o, k[2], k[3])).k++);
+    o.hits.filter((h) => !h[7] && inWin(h[0])).forEach((h) => get(zone(o, h[1], h[2])).h++);
     if (o.death && inWin(o.death[0])) get(zone(o, o.death[1], o.death[2])).d++;
   });
   const zs = [...z.values()].filter((e) => e.name).sort((a, b) => b.t - a.t).slice(0, 18);
   $('#zoneSub').textContent = `${cap(mk)} · ${mine.length} Operator rounds${S.f.side === 'all' ? ' · both sides, filter a side for a cleaner read' : ' · ' + SIDE[S.f.side]}`;
-  $('#zones').innerHTML = zs.length ? `<table><thead><tr><th>Area</th><th class="num">Time share</th><th class="num">Setups</th><th class="num">Op kills</th><th class="num">Deaths</th></tr></thead><tbody>${zs.map((e) => `<tr><td>${esc(e.name)}</td><td class="num">${pct(e.t, total)}</td><td class="num">${e.s || ''}</td><td class="num">${e.k || ''}</td><td class="num">${e.d || ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Callout names unavailable (run etl/fetch_maps.py).</p>';
+  $('#zones').innerHTML = zs.length ? `<table><thead><tr><th>Area</th><th class="num">Time share</th><th class="num">Setups</th><th class="num">Op kills</th><th class="num" title="Operator shots that hit but did not kill">Hit, no kill</th><th class="num">Deaths</th></tr></thead><tbody>${zs.map((e) => `<tr><td>${esc(e.name)}</td><td class="num">${pct(e.t, total)}</td><td class="num">${e.s || ''}</td><td class="num">${e.k || ''}</td><td class="num">${e.h || ''}</td><td class="num">${e.d || ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Callout names unavailable (run etl/fetch_maps.py).</p>';
 }
 
 // ---------------------------------------------------------------- timing
@@ -423,7 +561,7 @@ function viewRotations() {
   return `<div class="grid tiles">${tiles}</div>
   <div class="grid map-layout">
     <div class="card">
-      <div class="controls">${mapPicker(ops)}<span class="muted">Path from first kill (1) to second kill (2), any weapon, in rounds holding the Op</span></div>
+      <h2>${mapThumb(mk)}Paths on ${cap(mk || '')}</h2><p class="sub">From first kill (1) to second kill (2), any weapon, in rounds holding the Op.${S.f.map === 'all' ? ' The numbers on this tab cover all maps; pick a map under “Where” to match them to this picture.' : ''}</p>
       <div class="mapwrap"><canvas id="rotc"></canvas></div>
       ${legend([['First kill position', C.kill, 'dot'], ['Second kill position', C.def, 'dot'], ['Path between them', '#c3c2b7']])}
       <p class="note">${cap(mk || '')}: hover a marker for the round, click to open its replay.</p>
@@ -572,10 +710,13 @@ function openRound(o) { S.sel = o; setTab('rounds'); }
 // ---------------------------------------------------------------- shell
 const VIEWS = { overview: viewOverview, map: viewMap, timing: viewTiming, rotations: viewRotations, economy: viewEconomy, rounds: viewRounds };
 const league = () => S.mode === 'league';
+const home = () => S.mode === 'home';
+const homeState = () => ({ comp: S.hf.comp, ...S.hv });
 
 function urlFor() {
   const q = new URLSearchParams();
-  if (league()) Object.entries(S.lf).forEach(([k, v]) => { if (v !== 'all') q.set(k, v); });
+  if (home()) { if (S.hf.comp !== 'all') q.set('comp', S.hf.comp); }
+  else if (league()) { q.set('view', 'league'); Object.entries(S.lf).forEach(([k, v]) => { if (v !== 'all') q.set(k, v); }); }
   else {
     q.set('team', S.T.team.id);
     if (S.tab !== 'overview') q.set('tab', S.tab);
@@ -586,18 +727,23 @@ function urlFor() {
 }
 
 function render() {
-  if (league() ? !S.L : !S.T) return;
+  if (S.mode === 'team' ? !S.T : !S.L) return;
   // The filter bar is rebuilt each time; put keyboard focus back where it was.
   const act = document.activeElement;
   const focusKey = act && act.closest && act.closest('#filters') && act.dataset.f ? [act.dataset.f, act.dataset.v] : null;
-  $('#tabs').hidden = league();
+  document.body.dataset.mode = S.mode;
+  $('#tabs').hidden = S.mode !== 'team';
+  $('#filters').hidden = home();
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
-  document.title = league() ? 'Operator Tracker' : `${S.T.team.name} · Operator Tracker`;
-  $('#hero').innerHTML = league() ? leagueHero() : teamHero();
-  $('#filters').innerHTML = league() ? leagueFilters(S.L, S.lf) : teamFilters();
-  $('#view').innerHTML = league() ? viewLeague(S.L, { f: S.lf, ...S.lv }) : VIEWS[S.tab]();
+  document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.nav === S.mode));
+  document.title = S.mode === 'team' ? `${S.T.team.name} · Operator Tracker` : league() ? 'League stats · Operator Tracker' : 'Operator Tracker';
+  S.shownMap = null;
+  const viewHtml = home() ? homeGrid(S.L, homeState()) : league() ? viewLeague(S.L, { f: S.lf, ...S.lv }) : teamView();   // before the header: it reads shownMap
+  $('#hero').innerHTML = home() ? homeHero(S.L, homeState()) + assetHint() : league() ? leagueHero() : teamHero();
+  $('#filters').innerHTML = home() ? '' : league() ? leagueFilters(S.L, S.lf) : teamFilters();
+  $('#view').innerHTML = viewHtml;
   if (focusKey) { const el = [...document.querySelectorAll('#filters [data-f]')].find((x) => x.dataset.f === focusKey[0] && x.dataset.v === focusKey[1]); if (el) el.focus(); }
-  if (!league()) {
+  if (S.mode === 'team') {
     if (S.tab === 'map') drawMapTab();
     if (S.tab === 'rotations') drawRotations();
     if (S.tab === 'rounds') drawReplay();
@@ -607,12 +753,22 @@ function render() {
   S.push = false;
 }
 function setTab(t) {
+  if (t !== S.tab) S.push = true;       // tabs and players are steps Back should undo; other filters are not
   S.tab = t;
   render();
   window.scrollTo({ top: 0 });
 }
 
 // ---------------------------------------------------------------- navigation
+/** The team picker. */
+function goHome() {
+  if (!S.L) return;
+  S.mode = 'home'; S.push = true; S.hv.q = '';
+  render();
+  window.scrollTo({ top: 0 });
+  const q = $('#homeQ');
+  if (q) q.focus({ preventScroll: true });
+}
 function goLeague(filters) {
   if (!S.L) return;
   S.mode = 'league'; S.push = true;
@@ -622,14 +778,18 @@ function goLeague(filters) {
   render();
   window.scrollTo({ top: 0 });
 }
-/** Open a team. pid = GRID player id to filter to; carry = bring the league filters along. */
+/** Open a team. pid = GRID player id to filter to; carry = bring the current page's filters along. */
 async function goTeam(id, { pid, carry = false } = {}) {
-  const lf = { ...S.lf };
+  const from = S.mode, lf = { ...S.lf }, comp = S.hf.comp;
   if (!(await loadTeam(id))) return;
   S.mode = 'team'; S.tab = 'overview'; S.push = true;
-  if (carry) {
+  if (carry && from === 'league') {
     S.f.map = lf.map; S.f.side = lf.side; S.f.agent = lf.agent;
     if (lf.comp.startsWith('e:')) S.f.event = lf.comp.slice(2);
+  } else if (carry && from === 'home') {
+    // "Cloud9 in that competition": only worth a filter if they also played elsewhere
+    if (comp.startsWith('e:')) S.f.event = comp.slice(2);
+    else if (comp.startsWith('c:') && S.T.games.some((g) => circuitOf(g.event) !== comp.slice(2))) S.f.event = comp;
   }
   if (pid) { const i = S.T.players.findIndex((p) => p.id === pid); if (i >= 0) S.f.player = String(i); }
   cleanTeamFilters();
@@ -648,10 +808,15 @@ async function route() {
     Object.keys(S.f).forEach((k) => (S.f[k] = q.get(k) || 'all'));
     cleanTeamFilters();
     S.tab = VIEWS[q.get('tab')] ? q.get('tab') : 'overview';
-  } else {
+  } else if (q.get('view') === 'league') {
     S.mode = 'league';
     Object.keys(S.lf).forEach((k) => (S.lf[k] = q.get(k) || 'all'));
     cleanLeagueFilters(S.L, S.lf);
+  } else {
+    S.mode = 'home';
+    const f = { comp: q.get('comp') || 'all', map: 'all', side: 'all', agent: 'all' };
+    cleanLeagueFilters(S.L, f);
+    S.hf.comp = f.comp;
   }
   render();
 }
@@ -659,7 +824,9 @@ async function route() {
 function setFilter(key, v, toggle = false) {
   const f = league() ? S.lf : S.f;
   if (!(key in f)) return;
-  f[key] = toggle && String(f[key]) === String(v) ? 'all' : v;
+  const next = toggle && String(f[key]) === String(v) ? 'all' : v;
+  if (key === 'player' && String(next) !== String(f[key])) S.push = true;
+  f[key] = next;
   if (league()) S.lv.allP = S.lv.allT = false;
   // an agent the newly chosen player never held the Operator on would leave every tab empty
   else if (key === 'player' && f.agent !== 'all' && f.player !== 'all' && !S.T.ops.some((o) => o.p === +f.player && o.row.agent === f.agent)) f.agent = 'all';
@@ -702,7 +869,8 @@ function searchResults(query) {
 
 function wire() {
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
-  $('#home').addEventListener('click', (e) => { if (!S.L || e.metaKey || e.ctrlKey) return; e.preventDefault(); goLeague({}); });
+  $('#home').addEventListener('click', (e) => { if (!S.L || e.metaKey || e.ctrlKey) return; e.preventDefault(); goHome(); });
+  $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.nav === 'home') goHome(); else goLeague(); });
 
   const filters = $('#filters');
   filters.addEventListener('change', (e) => { if (e.target.dataset.f) setFilter(e.target.dataset.f, e.target.value); });
@@ -716,30 +884,38 @@ function wire() {
   $('#hero').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    if (b.dataset.go === 'league') goLeague();
+    if (b.dataset.go === 'home') goHome();
+    else if (b.dataset.comp) { S.hf.comp = b.dataset.comp; render(); const again = [...document.querySelectorAll('#hero [data-comp]')].find((x) => x.dataset.comp === S.hf.comp); if (again) again.focus(); }
     else if (b.dataset.go === 'team') setFilter('player', 'all');
     else if (b.dataset.player != null) setFilter('player', b.dataset.player);
+    else if (b.dataset.map) setFilter('map', b.dataset.map);
     else if (b.dataset.clear) setFilter(b.dataset.clear, 'all');
   });
 
+  // picker search: typing only redraws the grid, so the box keeps focus
+  $('#hero').addEventListener('input', (e) => { if (e.target.id !== 'homeQ') return; S.hv.q = e.target.value; $('#view').innerHTML = homeGrid(S.L, homeState()); });
+  $('#hero').addEventListener('keydown', (e) => { if (e.target.id === 'homeQ' && e.key === 'Enter') { const first = $('#view .team-card'); if (first) first.click(); } });
+
   const view = $('#view');
   view.addEventListener('click', (e) => {
-    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more]');
+    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more],[data-spot],[data-jump],[data-hsort]');
     if (!el || e.target.closest('select,input,label')) return;
     const d = el.dataset;
     if (d.team) goTeam(d.team, { pid: d.pid, carry: true });
+    else if (d.hsort) { S.hv.sort = d.hsort; render(); }
+    else if (d.spot) { S.f.map = d.spot; S.layers[d.layer] = true; S.push = true; setTab('map'); }
+    else if (d.jump) { S.push = true; setTab(d.jump); }
     else if (d.sortp) { S.lv.sortP = d.sortp; S.lv.allP = false; render(); }
     else if (d.sortt) { S.lv.sortT = d.sortt; render(); }
     else if (d.more) { S.lv[d.more] = true; render(); }
     else if (d.player != null) setFilter('player', d.player);
-    else if (d.map) setFilter('map', d.map, league());
+    else if (d.map) setFilter('map', d.map, true);
     else if (d.agent) setFilter('agent', d.agent, true);
     else if (d.op != null) { S.sel = S.T.ops.find((o) => o.i === +d.op); render(); }
   });
   view.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.id === 'mapPick') { S.mapPick = t.value; render(); }
-    else if (t.dataset.layer) { S.layers[t.dataset.layer] = t.checked; drawMapTab(); }
+    if (t.dataset.layer) { S.layers[t.dataset.layer] = t.checked; drawMapTab(); }
   });
   view.addEventListener('input', (e) => {
     const t = e.target;
@@ -786,5 +962,6 @@ async function main() {
   $('#corpus').textContent = `${S.index.games.toLocaleString()} maps · ${S.index.rounds.toLocaleString()} rounds · ${S.index.opRounds.toLocaleString()} Operator rounds · built ${S.index.generated}`;
   initSearch($('#q'), $('#qPop'), searchResults);
   await route();
+  if (home() && $('#homeQ')) $('#homeQ').focus({ preventScroll: true });
 }
 main();

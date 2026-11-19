@@ -104,6 +104,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
     # (team, map, side, event) -> [rounds, rounds with an Op, won with, won without]
     lg_team = defaultdict(lambda: [0] * 4)
     lg_names: dict[str, str] = {}
+    lg_games = defaultdict(int)      # (team, event) -> maps played
     n_games = n_rounds = n_ops = 0
     missing = []
 
@@ -180,6 +181,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
 
             for tid in tids:
                 opp = tids[1] if tid == tids[0] else tids[0]
+                lg_games[(tid, s["event"])] += 1
                 T = teams.setdefault(tid, {
                     "team": {"id": tid, "name": team_names.get(tid, g["teams"][tid])},
                     "players": [], "_pidx": {}, "games": [], "ops": [],
@@ -282,6 +284,8 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
                  for k, v in lg_rows.items()],
         "trows": [[tm_i[k[0]], mp_i[k[1]], int(k[2] == "d"), ev_i[k[3]], *v]
                   for k, v in lg_team.items()],
+        "tgames": [[tm_i[t], ev_i[e], n] for (t, e), n in lg_games.items()
+                   if t in tm_i and e in ev_i],
     }
     with open(OUT / "league.json", "w", encoding="utf-8") as f:
         json.dump(league, f, separators=(",", ":"))
