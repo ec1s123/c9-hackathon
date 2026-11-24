@@ -19,6 +19,15 @@ What the feed gives us (and what it does not):
   two rounds (charges refilling), so they are not casts and are left out. No
   feed says where an ability lands: the only trace is the position of the
   enemies it damaged.
+* What an ability did is in the feed in three ways, all kept per cast: the
+  damage it dealt (every hit names its source), the kills it finished (a kill
+  names only guns, so an ability kill is one whose last hit was the ability),
+  and assists. Each kill lists who assisted but not how. An assister who had
+  damaged the victim with an ability gives that cast a damage assist. An
+  assister who never damaged the victim earned it some other way (a flash, a
+  stun, a reveal): every ability they used in the ``SETUP_S`` seconds before
+  the kill is marked as a possible cause, and the web app keeps the mark only
+  for abilities that can do that (``web/utilmeta.js``).
 * When a round is restarted the feed takes its casts back
   (``player-!used-ability``) and re-applies them with new ids and stale
   times. Taken-back casts are removed and re-applied ones are not counted.
@@ -39,8 +48,10 @@ except ImportError:  # pragma: no cover - older Pythons
 
 OP = "operator"
 OP_COST = 4700
-EXTRACT_VERSION = 6
+EXTRACT_VERSION = 7
 AFTER_S = 5   # "where are they after using it": seconds after the cast
+SETUP_S = 10  # an assist without damage is tied to abilities used this long before the kill
+FOLLOW_S = 5  # "the caster got a kill right after": seconds after the cast
 
 SHIELDS = ("heavyshield", "lightshield", "regenshield")
 # Rough price order, used to pick the "main" weapon out of an inventory.
@@ -137,9 +148,44 @@ def _pos_at(track: list, t: float):
     return (near[1], near[2]) if abs(near[0] - t) <= 3 else None
 
 
+def _latest(casts: list, pid: str, t: float, within: float) -> list:
+    """The player's most recent cast of each ability in the ``within`` seconds before t."""
+    seen, out = set(), []
+    for c in reversed(casts):
+        if c["a"] != pid or c["T"] > t or c["id"] in seen:
+            continue
+        if t - c["T"] > within:
+            break       # casts are in time order
+        seen.add(c["id"])
+        out.append(c)
+    return out
+
+
+def _credit(rnd: "_Round", t: float, killer: str, victim: str, weapon: str, assists: list):
+    """Tie one kill back to the ability casts behind it."""
+    for c in reversed(rnd.util):        # finished by an ability: its latest cast
+        if c["a"] == killer and c["id"] == weapon:
+            c["k"] = c.get("k", 0) + 1
+            break
+    for c in _latest(rnd.util, killer, t, FOLLOW_S):
+        if c["id"] != weapon:
+            c["ok"] = c.get("ok", 0) + 1
+    for a in assists:
+        pid = a.get("playerId")
+        if pid == killer:
+            continue
+        if (pid, victim) in rnd.hurt:
+            for c in rnd.util:
+                if c["a"] == pid and victim in c.get("vic", ()):
+                    c["da"] = c.get("da", 0) + 1
+        else:
+            for c in _latest(rnd.util, pid, t, SETUP_S):
+                c["sa"] = c.get("sa", 0) + 1
+
+
 class _Round:
     __slots__ = ("n", "t_start", "t0", "t_end", "sides", "winner", "win_type",
-                 "plant", "P", "dmg", "kills", "abil", "util", "ended")
+                 "plant", "P", "dmg", "kills", "abil", "util", "hurt", "ended")
 
     def __init__(self, n: int, t_start: float):
         self.n = n
@@ -155,6 +201,7 @@ class _Round:
         self.kills = []
         self.abil = []
         self.util = []       # every cast from the start of the buy phase
+        self.hurt = set()    # (attacker, victim) pairs with any damage this round
         self.ended = False
 
 
@@ -225,10 +272,16 @@ def extract_series(path: str, valid_games: set[str], supplement: str | None = No
                 after = _pos_at(r.P[c["a"]]["track"], ta)
             row = [rt, c["a"], c["id"], x, y, yaw, pit,
                    after[0] if after else None, after[1] if after else None, c["src"]]
-            if "hits" in c:  # enemies it damaged: where they stood (mean), delay to the first, how many
+            if "hits" in c:  # enemies it damaged: where they stood (mean), delay to the first
                 hs = list(c["hits"].values())
                 row += [round(sum(h[0] for h in hs) / len(hs)), round(sum(h[1] for h in hs) / len(hs)),
-                        round(c["ht"] - c["T"], 1), len(hs)]
+                        round(c["ht"] - c["T"], 1)]
+            else:
+                row += [None, None, None]
+            # What it did: enemies damaged, damage, kills it finished, assists through its
+            # damage, assists it may have set up, kills by the caster right after.
+            row += [len(c.get("vic", ())), c.get("dmg", 0), c.get("k", 0), c.get("da", 0),
+                    c.get("sa", 0), c.get("ok", 0)]
             out_util.append(row)
         games[rnd_game]["rounds"].append({
             "n": r.n, "t0": round(r.t0), "dur": round(dur, 1),
@@ -346,14 +399,18 @@ def extract_series(path: str, valid_games: set[str], supplement: str | None = No
                     srcs = delta.get("damageDealtSources") or []
                     parts = delta.get("damageDealtTargets") or []
                     ap, vp = _pos(a["state"]), _pos(v["state"])
-                    if srcs and vp:
-                        # Where an enemy stood when an ability first hurt them marks
-                        # roughly where it landed.
+                    rnd.hurt.add((a["id"], v["id"]))
+                    if srcs:
                         name = (srcs[0].get("source") or {}).get("name", "")
                         for c in reversed(rnd.util):
                             if c["a"] == a["id"] and c["id"] == name:
-                                c.setdefault("hits", {}).setdefault(v["id"], vp)
-                                c.setdefault("ht", t)
+                                c["dmg"] = c.get("dmg", 0) + srcs[0].get("damageAmount", 0)
+                                c.setdefault("vic", set()).add(v["id"])
+                                if vp:
+                                    # Where an enemy stood when an ability first hurt them
+                                    # marks roughly where it landed.
+                                    c.setdefault("hits", {}).setdefault(v["id"], vp)
+                                    c.setdefault("ht", t)
                                 break
                     if srcs and ap and vp:
                         rnd.dmg.append({
@@ -379,6 +436,8 @@ def extract_series(path: str, valid_games: set[str], supplement: str | None = No
                         if last_hit:
                             last_hit["kill"] = True
                             weapon = weapon or last_hit["src"]
+                        _credit(rnd, t, a["id"], v["id"], weapon,
+                                (delta.get("round") or {}).get("killAssistsReceivedFromPlayer") or [])
                         ap, vp = _pos(a["state"]), _pos(v["state"])
                         if ap and vp:
                             rnd.kills.append({"t": rt, "a": a["id"], "v": v["id"], "w": weapon,

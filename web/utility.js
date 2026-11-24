@@ -3,11 +3,11 @@
 import { barChart, barList, legend, tile } from './charts.js';
 import { MapView, RAMP_WARM, zoneOf } from './map.js';
 import { teamLogo, agentIcon, agentImg, agentName, agentRole, abilityIcon, abilityName } from './icons.js';
-import { KINDS, KIND_NAME, MODEL_NOTE, MODEL_SHORT, WALL_SHOT, abilityMeta, firstWall, reach } from './utilmeta.js';
+import { KINDS, KIND_NAME, MODEL_NOTE, MODEL_SHORT, SETS_UP, WALL_SHOT, abilityMeta, firstWall, reach } from './utilmeta.js';
 import { circuitOf } from './league.js';
 
 const DATA = '../data/';
-const C = { heat: '#3987e5', after: '#d95926', focus: '#199e70', mark: '#c3c2b7' };
+const C = { heat: '#3987e5', after: '#d95926', focus: '#199e70', mark: '#c3c2b7', paid: '#e6c229' };
 const SIDE = { a: 'Attack', d: 'Defense' };
 const ROLES = [['all', 'All'], ['Sentinel', 'Sentinels'], ['Controller', 'Controllers'], ['Initiator', 'Initiators'], ['Duelist', 'Duelists']];
 const OPEN_DS = 30;   // "as the barriers drop": the first 3 seconds
@@ -55,6 +55,8 @@ export function prepUtil(U, UI, meta, walkable) {
   const c = U.c, n = c.x.length;
   U.n = n;
   U.after = UI.after;
+  U.setup = UI.setup; U.follow = UI.follow;
+  U.hasImpact = Boolean(U.im);        // false for data built before impact was extracted
   U.callouts = (meta && meta.callouts) || [];
   U.ab = U.abilities.map(([id, agent]) => {
     const m = abilityMeta(id), fit = UI.fit[id] || null;
@@ -66,11 +68,17 @@ export function prepUtil(U, UI, meta, walkable) {
   const lx = new Float32Array(n), ly = new Float32Array(n);
   const side = new Uint8Array(n), slot = new Uint8Array(n), post = new Uint8Array(n);
   const rk = new Int32Array(n), zone = new Int16Array(n), lq = new Uint8Array(n);
+  // What each use did. as = assists through its damage plus assists it set up; paid = led to a kill.
+  const hit = new Uint8Array(n), dmg = new Uint16Array(n), kl = new Uint8Array(n), as = new Uint8Array(n), own = new Uint8Array(n), paid = new Uint8Array(n);
+  const won = new Uint8Array(n);      // the caster's team won the round: 1, lost: 0, not known: 2
+  const winner = U.games.map((g) => new Map((g.w || []).map(([rn, ws]) => [rn, ws])));
   const nearest = (x, y) => { let best = -1, bd = Infinity; for (let k = 0; k < U.callouts.length; k++) { const q = U.callouts[k], d = (q.x - x) ** 2 + (q.y - y) ** 2; if (d < bd) { bd = d; best = k; } } return best; };
   for (let i = 0; i < n; i++) {
     const k = c.k[i], g = c.g[i], a = U.ab[c.ab[i]];
     side[i] = k & 1; slot[i] = (k >> 1) & 1;
     rk[i] = ((g * 128 + c.rn[i]) << 1) | slot[i];            // one team's round
+    const ws = winner[g].get(c.rn[i]);
+    won[i] = ws == null ? 2 : ws === slot[i] ? 1 : 0;
     const pt = plant[g].get(c.rn[i]);
     post[i] = pt != null && c.t[i] >= pt * 10 ? 1 : 0;
     lx[i] = c.x[i]; ly[i] = c.y[i];
@@ -89,10 +97,42 @@ export function prepUtil(U, UI, meta, walkable) {
   const o = U.o || { i: [] };
   for (let k = 0; k < o.i.length; k++) { const i = o.i[k]; lx[i] = o.x[k]; ly[i] = o.y[k]; lq[i] = o.q[k] === 2 ? LQ.SEEN : LQ.MATCH; }
   for (let i = 0; i < n; i++) zone[i] = nearest(lx[i], ly[i]);
-  Object.assign(U, { lx, ly, lq, side, slot, post, rk, zone });
+  const im = U.im || { i: [] };
+  for (let k = 0; k < im.i.length; k++) {
+    const i = im.i[k];
+    hit[i] = im.h[k]; dmg[i] = im.d[k]; kl[i] = im.k[k]; own[i] = im.f[k];
+    as[i] = im.a[k] + (SETS_UP.has(U.ab[c.ab[i]].meta.k) ? im.s[k] : 0);
+    paid[i] = kl[i] || as[i] ? 1 : 0;
+  }
+  Object.assign(U, { lx, ly, lq, side, slot, post, rk, zone, hit, dmg, kl, as, own, paid, won });
   return U;
 }
 const zoneName = (U, k) => (k >= 0 ? U.callouts[k].name : '');
+
+/** What a set of uses did, and how the rounds they were in went. */
+function impact(U, ids) {
+  const o = { n: ids.length, hit: 0, dmg: 0, kills: 0, assists: 0, paid: 0, own: 0, rounds: 0, won: 0 };
+  const seen = new Set();
+  for (const i of ids) {
+    if (U.hit[i]) o.hit++;
+    o.dmg += U.dmg[i]; o.kills += U.kl[i]; o.assists += U.as[i];
+    if (U.paid[i]) o.paid++;
+    if (U.own[i]) o.own++;
+    if (U.won[i] !== 2 && !seen.has(U.rk[i])) { seen.add(U.rk[i]); o.rounds++; o.won += U.won[i]; }
+  }
+  return o;
+}
+/** One use in a few words, for the VOD list. */
+function did(U, i) {
+  const out = [];
+  if (U.dmg[i]) out.push(`${U.dmg[i]} damage on ${U.hit[i]}`);
+  if (U.kl[i]) out.push(plural(U.kl[i], 'kill'));
+  if (U.as[i]) out.push(plural(U.as[i], 'assist'));
+  if (U.own[i] && !U.kl[i]) out.push(`own kill within ${U.follow} s`);
+  return out.join(' · ');
+}
+const paidCell = (I) => (I.paid ? `${int(I.paid)} <span class="low">${pct(I.paid, I.n)}</span>` : '<span class="low">–</span>');
+const impactTip = (U, R, I) => (!U.hasImpact ? '' : `<span class="muted">Led to a kill in ${int(I.paid)} of ${plural(I.n, 'use')}: ${plural(I.kills, 'kill')}, ${plural(I.assists, 'assist')}${I.dmg ? ` · ${Math.round(I.dmg / I.n)} damage a use` : ''}</span><span class="muted">Rounds it was used in: won ${int(I.won)} of ${int(I.rounds)} (${pct(I.won, I.rounds)}); this side wins ${pct(R.sideWon, R.sideRounds)} here</span>`);
 
 /** Keep the filters consistent with each other and with what this map has. */
 export function cleanUtil(f, U) {
@@ -154,8 +194,14 @@ function compute(U, f, src) {
     if (f.ability !== 'all' ? a.id === f.ability : roleOK && kindOK && agentOK) idx.push(i);
   }
   const X = src === 'from' ? c.x : U.lx, Y = src === 'from' ? c.y : U.ly;
+  // How often the in-scope teams win a round on this side here, whatever they use.
+  let sideRounds = 0, sideWon = 0;
+  U.games.forEach((g, gi) => (g.w || []).forEach(([, ws, d0]) => {
+    if (d0 < 0) return;
+    for (const s of [0, 1]) if (inScope[gi][s] && (s === 0 ? d0 : 1 - d0) === sd) { sideRounds++; if (ws === s) sideWon++; }
+  }));
   U._key = key;
-  U._res = { f, src, sd, ti, inScope, roundsWith, rounds: roundsWith([]), base, idx, abN, agN, X, Y };
+  U._res = { f, src, sd, ti, inScope, roundsWith, rounds: roundsWith([]), base, idx, abN, agN, X, Y, sideRounds, sideWon };
   return U._res;
 }
 
@@ -206,7 +252,7 @@ function spots(U, R) {
         zone: zoneOf({ callouts: U.callouts }, x, y), t: median(ts), early: ts.filter((t) => t < 0).length,
         from: known < ids.length / 2,       // mostly "where the player stood", not where it went
         afterN, stay, afterZone: top ? top[0] : '', afterShare: top ? top[1] / afterN : 0,
-        of: R.roundsWith([a.agent]),
+        of: R.roundsWith([a.agent]), im: impact(U, ids),
       });
     }
   }
@@ -241,6 +287,7 @@ function together(U, R) {
   R.together = [...m.values()].filter((e) => e.rounds.size >= 2).map((e) => ({
     ...e, rounds: e.rounds.size, ids: [...e.ids], of: R.roundsWith(e.a.agent === e.b.agent ? [e.a.agent] : [e.a.agent, e.b.agent]),
   })).sort((p, q) => q.rounds - p.rounds).slice(0, 30);
+  for (const e of R.together) e.im = impact(U, e.ids);
   return R.together;
 }
 
@@ -281,6 +328,7 @@ function lineups(U, R) {
       pitch: Math.round(median(ids.map((i) => c.pit[i]))),
       yaw: Math.atan2(mean((i) => Math.sin(c.yaw[i] * Math.PI / 180)), mean((i) => Math.cos(c.yaw[i] * Math.PI / 180))) * 180 / Math.PI,
       latest: ids.reduce((p, i) => (U.games[c.g[i]].date > U.games[c.g[p]].date ? i : p), ids[0]),   // to find it in a VOD
+      im: impact(U, ids),
     });
   }
   R.lineups = out.sort((p, q) => q.rounds - p.rounds || q.n - p.n).slice(0, 40);
@@ -364,7 +412,7 @@ function habitCards(U, R, f, fo) {
     const moment = s.early > s.n / 2 ? 'before barriers' : when(s.t);
     return `<button class="pick ${fo === s ? 'on' : ''}" data-ufocus="${esc(s.key)}">
       ${agentIcon(s.a.agent, 'lg')}
-      <span class="pk-main"><b>${abilityIcon(s.a.id)}${esc(abilityName(s.a.id))} from ${esc(s.zone) || 'one spot'}</b><small>${who} · ${moment}${s.lineup ? ` · ${aimText(s.pitch)}` : ''}</small></span>
+      <span class="pk-main"><b>${abilityIcon(s.a.id)}${esc(abilityName(s.a.id))} from ${esc(s.zone) || 'one spot'}</b><small>${who} · ${moment}${s.lineup ? ` · ${aimText(s.pitch)}` : ''}${s.im.paid ? ` · led to a kill ${int(s.im.paid)}×` : ''}</small></span>
       <span class="pk-stat"><b>${pct(s.rounds, s.of)}</b><small>${int(s.rounds)} of ${int(s.of)} rounds</small></span>
       <span class="meter"><i style="width:${(100 * s.rounds / s.of / max).toFixed(1)}%"></i></span>
     </button>`;
@@ -375,15 +423,21 @@ function habitCards(U, R, f, fo) {
     <div class="picks habits">${cards}</div></div>`;
 }
 /** Every round behind the isolated spot, newest first: what to open in the VOD. */
-function vodList(U, fo) {
-  const c = U.c;
-  const ids = [...fo.ids].sort((p, q) => U.games[c.g[q]].date.localeCompare(U.games[c.g[p]].date) || c.g[q] - c.g[p] || c.rn[p] - c.rn[q] || c.t[p] - c.t[q]);
+function vodList(U, R, fo, v) {
+  const c = U.c, HI = U.hasImpact, best = HI && v.vsort === 'paid';
+  const newest = (p, q) => U.games[c.g[q]].date.localeCompare(U.games[c.g[p]].date) || c.g[q] - c.g[p] || c.rn[p] - c.rn[q] || c.t[p] - c.t[q];
+  const ids = [...fo.ids].sort(best ? (p, q) => (U.kl[q] + U.as[q]) - (U.kl[p] + U.as[p]) || U.dmg[q] - U.dmg[p] || U.own[q] - U.own[p] || newest(p, q) : newest);
+  const one = R.ti !== -1;      // one team picked: no need to name it on every row
   const rows = ids.slice(0, 80).map((i) => {
     const g = U.games[c.g[i]], s = U.slot[i], a = U.ab[c.ab[i]];
-    return `<tr><td>${g.date}</td><td><span class="who">${teamLogo(U.teams[g.t[s]].id, U.teams[g.t[s]].name)}${esc(U.teams[g.t[s]].name)}</span></td><td class="low">vs ${esc(U.teams[g.t[1 - s]].name)}</td><td class="num">${c.rn[i]}</td><td>${when(c.t[i])}</td><td>${agentIcon(a.agent)}${esc(U.players[c.p[i]].name)}</td><td>${abilityIcon(a.id)}${esc(abilityName(a.id))}</td></tr>`;
+    const result = HI ? `<td>${did(U, i) || '<span class="low">–</span>'}</td><td class="${U.won[i] === 1 ? '' : 'low'}">${['Lost', 'Won', '–'][U.won[i]]}</td>` : '';
+    return `<tr><td>${g.date}</td>${one ? '' : `<td><span class="who">${teamLogo(U.teams[g.t[s]].id, U.teams[g.t[s]].name)}${esc(U.teams[g.t[s]].name)}</span></td>`}<td class="low">vs ${esc(U.teams[g.t[1 - s]].name)}</td><td class="num">${c.rn[i]}</td><td>${when(c.t[i])}</td><td>${agentIcon(a.agent)}${esc(U.players[c.p[i]].name)}</td><td>${abilityIcon(a.id)}${esc(abilityName(a.id))}</td>${result}</tr>`;
   }).join('');
-  return `<h3 style="margin-top:14px">Rounds to check in the VOD</h3><p class="sub">${ids.length > 80 ? `Newest 80 of ${int(ids.length)}. ` : ''}Time is counted from the barriers dropping. ${esc(U.events.length > 1 ? '' : U.events[0] || '')}</p>
-    <div class="scroll" style="max-height:300px"><table><thead><tr><th>Date</th><th>Team</th><th>Opponent</th><th class="num">Round</th><th>When</th><th>Player</th><th>Ability</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const I = fo.im;
+  const summary = HI ? `<p class="sub"><b>What it did.</b> ${I.paid ? `Led to a kill in <b>${int(I.paid)}</b> of ${plural(I.n, 'use')} (${pct(I.paid, I.n)}): ${plural(I.kills, 'kill')} it finished, ${plural(I.assists, 'assist')}.` : `None of these ${plural(I.n, 'use')} is tied to a kill.`}${I.dmg ? ` It hurt someone in ${pct(I.hit, I.n)}, ${Math.round(I.dmg / I.n)} damage a use.` : ''} The player got a kill of their own within ${U.follow} s in ${pct(I.own, I.n)}. Rounds it was used in: won <b>${int(I.won)}</b> of ${int(I.rounds)} (${pct(I.won, I.rounds)}), where this side wins ${pct(R.sideWon, R.sideRounds)} of its rounds here.</p>` : '';
+  const order = HI ? `<div class="seg small" role="group" aria-label="Order" style="margin-bottom:8px">${[['new', 'Newest first'], ['paid', 'What worked first']].map(([k, l]) => `<button data-uvsort="${k}" class="${(best ? 'paid' : 'new') === k ? 'on' : ''}" aria-pressed="${(best ? 'paid' : 'new') === k}">${l}</button>`).join('')}</div>` : '';
+  return `<h3 style="margin-top:14px">Rounds to check in the VOD</h3>${summary}<p class="sub">${ids.length > 80 ? `${best ? 'Top' : 'Newest'} 80 of ${int(ids.length)}. ` : ''}Time is counted from the barriers dropping. ${esc(U.events.length > 1 ? '' : U.events[0] || '')}</p>${order}
+    <div class="scroll" style="max-height:300px"><table><thead><tr><th>Date</th>${one ? '' : '<th>Team</th>'}<th>Opponent</th><th class="num">Round</th><th>When</th><th>Player</th><th>Ability</th>${HI ? '<th>What it did</th><th>Round</th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 // ---------------------------------------------------------------- header and filters
@@ -444,8 +498,9 @@ export function viewUtil(U, f, v, maps, index) {
   const head = `<h2 class="ctx-h">${team ? `${teamLogo(team.id, team.name, 'lg')}<span>${esc(team.name)}</span>` : '<span>All teams</span>'}<em>on</em>${thumb(maps, f.map)}<span>${cap(f.map)}</span><small>${scope}</small></h2>`;
   if (!R.rounds) return `<div class="ctx">${head}<p class="ctx-sub">${team ? `${esc(team.name)} has no ${SIDE[f.side].toLowerCase()} rounds on ${cap(f.map)} in this selection. Maps they have played are the bright tiles under “Where”.` : 'No rounds match these filters.'}</p></div>`;
   const used = new Set(R.idx.map((i) => U.rk[i])).size;
+  const HI = U.hasImpact, ALL = impact(U, R.idx);
   const sub = n
-    ? `<span><b>${int(n)}</b> uses in <b>${int(R.rounds)}</b> ${SIDE[f.side].toLowerCase()} rounds</span><span>${(n / R.rounds).toFixed(1)} a round</span><span>at least one in ${pct(used, R.rounds)} of rounds</span>`
+    ? `<span><b>${int(n)}</b> uses in <b>${int(R.rounds)}</b> ${SIDE[f.side].toLowerCase()} rounds</span><span>${(n / R.rounds).toFixed(1)} a round</span><span>at least one in ${pct(used, R.rounds)} of rounds</span>${HI ? `<span><b>${pct(ALL.paid, n)}</b> led to a kill</span>` : ''}`
     : `Nothing matches in ${int(R.rounds)} ${SIDE[f.side].toLowerCase()} rounds. Loosen the filters above.`;
   const ctx = `<div class="ctx">${head}<p class="ctx-sub">${sub}</p></div>`;
   if (!n) return ctx;
@@ -470,6 +525,21 @@ export function viewUtil(U, f, v, maps, index) {
   const abRows = [...byAb.values()].map((e) => ({ label: abilityName(e.a.id), icon: agentIcon(e.a.agent) + abilityIcon(e.a.id), n: e.rounds.size, d: R.roundsWith([e.a.agent]), attr: `data-uability="${esc(e.a.id)}"`, on: f.ability === e.a.id }))
     .sort((p, q) => q.n - p.n).slice(0, 16);
 
+  // ---- what it does
+  let payCard = '';
+  if (HI) {
+    const groups = new Map();
+    for (const i of R.idx) { if (!groups.has(c.ab[i])) groups.set(c.ab[i], []); groups.get(c.ab[i]).push(i); }
+    const list = [...groups].map(([ab, ids]) => ({ a: U.ab[ab], I: impact(U, ids) })).sort((p, q) => q.I.paid - p.I.paid || q.I.dmg - p.I.dmg || q.I.n - p.I.n);
+    const num = (x) => (x ? int(x) : '<span class="low">–</span>');
+    const cells = (I) => `<td class="num">${int(I.n)}</td><td class="num">${paidCell(I)}</td><td class="num">${num(I.kills)}</td><td class="num">${num(I.assists)}</td><td class="num">${I.dmg ? `${pct(I.hit, I.n)}` : '<span class="low">–</span>'}</td><td class="num">${I.dmg ? Math.round(I.dmg / I.n) : '<span class="low">–</span>'}</td><td class="num">${pct(I.own, I.n)}</td><td class="num">${pct(I.won, I.rounds)} <span class="low">of ${int(I.rounds)}</span></td>`;
+    const rows = list.slice(0, 30).map(({ a, I }) => `<tr class="click ${f.ability === a.id ? 'sel' : ''}" data-uability="${esc(a.id)}"><td>${abTag(a)}</td>${cells(I)}</tr>`).join('');
+    payCard = `<div class="card" style="margin-top:14px"><h2>What pays off</h2>
+      <p class="sub">What these ${int(n)} uses did, by ability. <b>Led to a kill</b>: the ability finished a kill, or its player was credited with an assist for it. An assist counts when the ability had damaged the victim, or, for flashes, stuns and recon, when the player never damaged the victim and had used it in the ${U.setup} s before the kill. The data names who assisted but not how, so that last link is the likeliest cause, not a recorded one. <b>Own kill</b> is the player getting a kill themselves within ${U.follow} s of using it. <b>Rounds won</b> is of the rounds it was used in; this side wins <b>${pct(R.sideWon, R.sideRounds)}</b> of its rounds here whatever it uses, and utility that only comes out late or after a plant will sit above or below that for reasons of its own. Click a row to see only that ability; isolate a spot or a lineup to list its rounds with what each use did.</p>
+      <div class="scroll"><table><thead><tr><th>Ability</th><th class="num">Uses</th><th class="num">Led to a kill</th><th class="num">Kills</th><th class="num">Assists</th><th class="num">Hurt someone</th><th class="num">Damage a use</th><th class="num">Own kill within ${U.follow} s</th><th class="num">Rounds won</th></tr></thead>
+      <tbody>${list.length > 1 ? `<tr><td><b>Everything shown</b></td>${cells(ALL)}</tr>` : ''}${rows}</tbody></table></div></div>`;
+  }
+
   // ---- how much of this is a real landing spot
   const q = [0, 0, 0, 0, 0, 0];
   for (const i of R.idx) q[U.lq[i]]++;
@@ -487,38 +557,39 @@ export function viewUtil(U, f, v, maps, index) {
   const spotRows = S.map((s, k) => {
     const moment = s.early > s.n / 2 ? 'before barriers' : when(s.t);
     const after = s.afterN >= 3 ? `${esc(s.afterZone) || '–'} <span class="low">${pct(Math.round(s.afterShare * s.afterN), s.afterN)}</span>` : '<span class="low">–</span>';
-    const tip = `<b>${esc(abilityName(s.a.id))}</b> at ${esc(s.zone) || 'this spot'}<span class="muted">${plural(s.n, 'use')} in ${plural(s.rounds, 'round')} · ${pct(s.rounds, s.of)} of ${int(s.of)} ${esc(agentName(s.a.agent))} rounds here</span><span class="muted">${s.afterN ? `${U.after} s later the player is still within 5 m in ${pct(s.stay, s.afterN)}` : 'No position 5 s later'}</span>`;
-    return `<tr class="click ${fo === s ? 'sel' : ''}" data-ufocus="${esc(s.key)}" data-tip="${esc(tip)}"><td class="num low">${k < SPOTS_ON_MAP ? k + 1 : ''}</td><td>${abTag(s.a)}</td><td>${v.src === 'land' && s.from ? '<span class="low">from</span> ' : ''}${esc(s.zone) || '–'}</td><td class="num">${int(s.rounds)} <span class="low">${pct(s.rounds, s.of)}</span></td><td class="low">${moment}</td><td>${after}</td></tr>`;
+    const tip = `<b>${esc(abilityName(s.a.id))}</b> at ${esc(s.zone) || 'this spot'}<span class="muted">${plural(s.n, 'use')} in ${plural(s.rounds, 'round')} · ${pct(s.rounds, s.of)} of ${int(s.of)} ${esc(agentName(s.a.agent))} rounds here</span><span class="muted">${s.afterN ? `${U.after} s later the player is still within 5 m in ${pct(s.stay, s.afterN)}` : 'No position 5 s later'}</span>${impactTip(U, R, s.im)}`;
+    return `<tr class="click ${fo === s ? 'sel' : ''}" data-ufocus="${esc(s.key)}" data-tip="${esc(tip)}"><td class="num low">${k < SPOTS_ON_MAP ? k + 1 : ''}</td><td>${abTag(s.a)}</td><td>${v.src === 'land' && s.from ? '<span class="low">from</span> ' : ''}${esc(s.zone) || '–'}</td><td class="num">${int(s.rounds)} <span class="low">${pct(s.rounds, s.of)}</span></td>${HI ? `<td class="num">${paidCell(s.im)}</td>` : ''}<td class="low">${moment}</td><td>${after}</td></tr>`;
   }).join('');
-  const spotCard = `<div class="card"><h2>Common spots</h2><p class="sub">Places one ability keeps going${v.src === 'from' ? ' from' : ' (“from” marks abilities where only the player\'s position is known)'}. The share is of rounds that agent was played on this side. “Then plays from” is where the player is ${U.after} s later (for anything placed before the barriers: ${U.after} s into the round). Click a row to isolate it on the map.</p>
-    ${spotRows ? `<div class="scroll"><table><thead><tr><th class="num">#</th><th>Ability</th><th>Area</th><th class="num">Rounds</th><th>When</th><th>Then plays from</th></tr></thead><tbody>${spotRows}</tbody></table></div>` : '<p class="muted">Too few uses here to call anything a common spot.</p>'}</div>`;
+  const spotCard = `<div class="card"><h2>Common spots</h2><p class="sub">Places one ability keeps going${v.src === 'from' ? ' from' : ' (“from” marks abilities where only the player\'s position is known)'}. The share is of rounds that agent was played on this side. “Then plays from” is where the player is ${U.after} s later (for anything placed before the barriers: ${U.after} s into the round).${HI ? ' “Led to a kill” is the share of uses, as in “What pays off” below.' : ''} Click a row to isolate it on the map${HI ? ' and list what each use did' : ''}.</p>
+    ${spotRows ? `<div class="scroll"><table><thead><tr><th class="num">#</th><th>Ability</th><th>Area</th><th class="num">Rounds</th>${HI ? '<th class="num">Led to a kill</th>' : ''}<th>When</th><th>Then plays from</th></tr></thead><tbody>${spotRows}</tbody></table></div>` : '<p class="muted">Too few uses here to call anything a common spot.</p>'}</div>`;
   const LN = lineups(U, R);
   const lineRows = LN.map((s) => {
     const lands = s.to ? `${esc(s.to)} <span class="low">${s.best >= LQ.MATCH ? 'seen' : s.best === LQ.WALL ? 'first wall' : 'est.'}</span>` : '<span class="low">not in the data</span>';
-    const tip = `<b>${esc(abilityName(s.a.id))}</b> from ${esc(s.zone) || 'this spot'}<span class="muted">${plural(s.n, 'throw')} in ${plural(s.rounds, 'round')}${R.ti === -1 ? ` by ${plural(s.teams, 'team')}` : ''}, all within 1.5 m and ${LINE_DEG}° of each other</span><span class="muted">${s.to ? `Lands around ${esc(s.to)}: ${LQ_TIP[s.best]}` : 'Where it lands is not in the data; click to see the line it leaves on'}</span><span class="muted">${aimText(s.pitch)} · latest: ${castRef(U, s.latest)}</span>`;
-    return `<tr class="click ${fo === s ? 'sel' : ''}" data-ufocus="${esc(s.key)}" data-tip="${esc(tip)}"><td>${abTag(s.a)}</td><td>${esc(s.zone) || '–'}</td><td>${lands}</td><td class="num">${int(s.rounds)} <span class="low">${pct(s.rounds, s.of)}</span></td>${R.ti === -1 ? `<td class="num">${s.teams}</td>` : ''}<td class="low">${s.early > s.n / 2 ? 'before barriers' : when(s.t)}</td></tr>`;
+    const tip = `<b>${esc(abilityName(s.a.id))}</b> from ${esc(s.zone) || 'this spot'}<span class="muted">${plural(s.n, 'throw')} in ${plural(s.rounds, 'round')}${R.ti === -1 ? ` by ${plural(s.teams, 'team')}` : ''}, all within 1.5 m and ${LINE_DEG}° of each other</span><span class="muted">${s.to ? `Lands around ${esc(s.to)}: ${LQ_TIP[s.best]}` : 'Where it lands is not in the data; click to see the line it leaves on'}</span><span class="muted">${aimText(s.pitch)} · latest: ${castRef(U, s.latest)}</span>${impactTip(U, R, s.im)}`;
+    return `<tr class="click ${fo === s ? 'sel' : ''}" data-ufocus="${esc(s.key)}" data-tip="${esc(tip)}"><td>${abTag(s.a)}</td><td>${esc(s.zone) || '–'}</td><td>${lands}</td><td class="num">${int(s.rounds)} <span class="low">${pct(s.rounds, s.of)}</span></td>${HI ? `<td class="num">${paidCell(s.im)}</td>` : ''}${R.ti === -1 ? `<td class="num">${s.teams}</td>` : ''}<td class="low">${s.early > s.n / 2 ? 'before barriers' : when(s.t)}</td></tr>`;
   }).join('');
   const lineCard = `<div class="card"><h2>Repeated lineups</h2><p class="sub">The same ability from the same spot (within 1.5 m) with the same crosshair (within ${LINE_DEG}°), in ${LINE_MIN} rounds or more. Position and aim are exact for every ability, smokes included. “Lands” is filled in only where damage gives it away. Click a row to see it on the map.</p>
-    ${lineRows ? `<div class="scroll"><table><thead><tr><th>Ability</th><th>Thrown from</th><th>Lands</th><th class="num">Rounds</th>${R.ti === -1 ? '<th class="num">Teams</th>' : ''}<th>When</th></tr></thead><tbody>${lineRows}</tbody></table></div>` : '<p class="muted">Nothing is thrown the same way three times in this selection.</p>'}</div>`;
-  const togRows = T.map((e) => `<tr class="click ${fo === e ? 'sel' : ''}" data-ufocus="${esc(e.key)}"><td>${abTag(e.a)}</td><td>${e.a === e.b ? '<span class="low">twice</span>' : abTag(e.b)}</td><td>${esc(e.zone) || '–'}</td><td class="num">${int(e.rounds)} <span class="low">${pct(e.rounds, e.of)}</span></td></tr>`).join('');
+    ${lineRows ? `<div class="scroll"><table><thead><tr><th>Ability</th><th>Thrown from</th><th>Lands</th><th class="num">Rounds</th>${HI ? '<th class="num">Led to a kill</th>' : ''}${R.ti === -1 ? '<th class="num">Teams</th>' : ''}<th>When</th></tr></thead><tbody>${lineRows}</tbody></table></div>` : '<p class="muted">Nothing is thrown the same way three times in this selection.</p>'}</div>`;
+  const togRows = T.map((e) => `<tr class="click ${fo === e ? 'sel' : ''}" data-ufocus="${esc(e.key)}"><td>${abTag(e.a)}</td><td>${e.a === e.b ? '<span class="low">twice</span>' : abTag(e.b)}</td><td>${esc(e.zone) || '–'}</td><td class="num">${int(e.rounds)} <span class="low">${pct(e.rounds, e.of)}</span></td>${HI ? `<td class="num">${paidCell(e.im)}</td>` : ''}</tr>`).join('');
   const togCard = `<div class="card"><h2>Used together</h2><p class="sub">Two abilities within 5 m and 10 s of each other, same team, same round (anything placed before the barriers counts as time zero). Uses the landing spot where one is known, otherwise where the player stood. The share is of rounds both agents were played.</p>
-    ${togRows ? `<div class="scroll"><table><thead><tr><th>Ability</th><th>With</th><th>Area</th><th class="num">Rounds</th></tr></thead><tbody>${togRows}</tbody></table></div>` : '<p class="muted">No pair shows up twice in this selection.</p>'}</div>`;
+    ${togRows ? `<div class="scroll"><table><thead><tr><th>Ability</th><th>With</th><th>Area</th><th class="num">Rounds</th>${HI ? '<th class="num">Led to a kill</th>' : ''}</tr></thead><tbody>${togRows}</tbody></table></div>` : '<p class="muted">No pair shows up twice in this selection.</p>'}</div>`;
 
   // ---- who
   let whoCard;
   if (R.ti === -1) {
     const byT = new Map();
-    for (const i of R.idx) { const t = U.games[c.g[i]].t[U.slot[i]]; byT.set(t, (byT.get(t) || 0) + 1); }
+    const paidT = new Map();
+    for (const i of R.idx) { const t = U.games[c.g[i]].t[U.slot[i]]; byT.set(t, (byT.get(t) || 0) + 1); if (U.paid[i]) paidT.set(t, (paidT.get(t) || 0) + 1); }
     const rounds = new Map();
     U.games.forEach((g, gi) => [0, 1].forEach((s) => { if (R.inScope[gi][s]) rounds.set(g.t[s], (rounds.get(g.t[s]) || 0) + g.sr[s][R.sd]); }));
     const rows = [...byT].map(([t, k]) => ({ t: U.teams[t], k, r: rounds.get(t) || 0 })).filter((e) => e.r >= 12).sort((p, q) => q.k / q.r - p.k / p.r).slice(0, 15);
     whoCard = `<div class="card"><h2>Teams that do this most</h2><p class="sub">Uses per ${SIDE[f.side].toLowerCase()} round on ${cap(f.map)}, teams with 12+ rounds. Click a team to see only theirs.</p>
-      <div class="scroll"><table><thead><tr><th>Team</th><th class="num">Uses</th><th class="num">Rounds</th><th class="num">Per round</th></tr></thead><tbody>${rows.map((e) => `<tr class="click" data-uteam="${esc(e.t.id)}"><td><span class="who">${teamLogo(e.t.id, e.t.name)}${esc(e.t.name)}</span></td><td class="num">${int(e.k)}</td><td class="num">${int(e.r)}</td><td class="num">${(e.k / e.r).toFixed(2)}</td></tr>`).join('')}</tbody></table></div></div>`;
+      <div class="scroll"><table><thead><tr><th>Team</th><th class="num">Uses</th><th class="num">Rounds</th><th class="num">Per round</th>${HI ? '<th class="num">Led to a kill</th>' : ''}</tr></thead><tbody>${rows.map((e) => `<tr class="click" data-uteam="${esc(e.t.id)}"><td><span class="who">${teamLogo(e.t.id, e.t.name)}${esc(e.t.name)}</span></td><td class="num">${int(e.k)}</td><td class="num">${int(e.r)}</td><td class="num">${(e.k / e.r).toFixed(2)}</td>${HI ? `<td class="num">${paidCell({ paid: paidT.get(U.teamIdx.get(e.t.id)) || 0, n: e.k })}</td>` : ''}</tr>`).join('')}</tbody></table></div></div>`;
   } else {
     const byP = new Map();
-    for (const i of R.idx) { let e = byP.get(c.p[i]); if (!e) byP.set(c.p[i], e = { p: U.players[c.p[i]], k: 0, ab: new Map() }); e.k++; e.ab.set(c.ab[i], (e.ab.get(c.ab[i]) || 0) + 1); }
+    for (const i of R.idx) { let e = byP.get(c.p[i]); if (!e) byP.set(c.p[i], e = { p: U.players[c.p[i]], k: 0, paid: 0, ab: new Map() }); e.k++; e.paid += U.paid[i]; e.ab.set(c.ab[i], (e.ab.get(c.ab[i]) || 0) + 1); }
     whoCard = `<div class="card"><h2>Who uses it</h2><p class="sub">Players behind these ${int(n)} uses, with what they use most.</p>
-      <div class="scroll"><table><thead><tr><th>Player</th><th class="num">Uses</th><th>Most used</th></tr></thead><tbody>${[...byP.values()].sort((p, q) => q.k - p.k).map((e) => `<tr><td>${esc(e.p.name)}</td><td class="num">${int(e.k)}</td><td><span class="tags">${[...e.ab].sort((p, q) => q[1] - p[1]).slice(0, 4).map(([a, k]) => `<span class="tag">${abTag(U.ab[a])} <span class="low">${k}</span></span>`).join('')}</span></td></tr>`).join('')}</tbody></table></div></div>`;
+      <div class="scroll"><table><thead><tr><th>Player</th><th class="num">Uses</th>${HI ? '<th class="num">Led to a kill</th>' : ''}<th>Most used</th></tr></thead><tbody>${[...byP.values()].sort((p, q) => q.k - p.k).map((e) => `<tr><td>${esc(e.p.name)}</td><td class="num">${int(e.k)}</td>${HI ? `<td class="num">${paidCell({ paid: e.paid, n: e.k })}</td>` : ''}<td><span class="tags">${[...e.ab].sort((p, q) => q[1] - p[1]).slice(0, 4).map(([a, k]) => `<span class="tag">${abTag(U.ab[a])} <span class="low">${k}</span></span>`).join('')}</span></td></tr>`).join('')}</tbody></table></div></div>`;
   }
 
   const box = (k, label) => `<label><input type="checkbox" data-ulayer="${k}" ${v[k] ? 'checked' : ''}> ${label}</label>`;
@@ -528,17 +599,18 @@ export function viewUtil(U, f, v, maps, index) {
   return `${ctx}${tiles}${habitCards(U, R, f, fo)}
   <div class="grid map-layout">
     <div class="card">
-      <div class="controls">${srcSeg}${box('heat', 'Heat')}<label><input type="checkbox" data-ulayer="pts" ${showMarks(v, n) ? 'checked' : ''}> Each use</label>${box('spots', 'Common spots')}</div>
+      <div class="controls">${srcSeg}${box('heat', 'Heat')}<label><input type="checkbox" data-ulayer="pts" ${showMarks(v, HI && v.paid ? ALL.paid : n) ? 'checked' : ''}> Each use</label>${box('spots', 'Common spots')}${HI ? box('paid', `Only what led to a kill <span class="low">${int(ALL.paid)}</span>`) : ''}</div>
       <div class="controls">${whoSeg}</div>
       ${focusBar}
       <div class="mapwrap"><canvas id="utilc"></canvas></div>
-      ${legend([[v.src === 'land' ? 'Where utility goes (brighter = more often)' : 'Where it is used from (brighter = more often)', C.heat], ['One use, with a line from the player', C.mark, 'dot'], ['Common spot, numbered as in the table', C.heat, 'dot'], [v.who === 'start' ? 'Where players stand as the barriers drop' : `Where the player is ${U.after} s later`, C.after], ['Isolated spot', C.focus, 'dot']])}
+      ${legend([[v.src === 'land' ? 'Where utility goes (brighter = more often)' : 'Where it is used from (brighter = more often)', C.heat], ['One use, with a line from the player', C.mark, 'dot'], ['Common spot, numbered as in the table', C.heat, 'dot'], [v.who === 'start' ? 'Where players stand as the barriers drop' : `Where the player is ${U.after} s later`, C.after], ['Isolated spot', C.focus, 'dot'], ...(HI ? [['Led to a kill', C.paid, 'dot']] : [])])}
       <p class="note">${v.src === 'from' ? 'Every position here is exact: where the player was standing the moment they used it, with a line showing which way they were aiming. Switch to “Where it lands, if known” for landing spots.' : note}</p>
       <p class="note" id="utilNote"></p>
-      ${fo ? vodList(U, fo) : ''}
+      ${fo ? vodList(U, R, fo, v) : ''}
     </div>
     <div class="grid" style="align-content:start">${startCard(U, R, f)}${spotCard}${lineCard}${togCard}</div>
   </div>
+  ${payCard}
   <div class="grid g2" style="margin-top:14px">
     <div class="card"><h2>What gets used</h2><p class="sub">Share of rounds with at least one use, out of the rounds that agent was played on this side. Click one to see only that ability.</p>${barList(abRows)}</div>
     <div class="card"><h2>When it is used</h2><p class="sub">Share of these uses by time since the barriers dropped. “Pre-round” is everything used before the barriers drop.</p>${timing}</div>
@@ -550,18 +622,20 @@ export function viewUtil(U, f, v, maps, index) {
 export function drawUtil(U, f, v, meta, onFocus) {
   const cv = document.querySelector('#utilc');
   if (!U || !cv) return;
-  const R = compute(U, f, v.src), c = U.c, idx = R.idx;
-  if (!idx.length) return;
+  const R = compute(U, f, v.src), c = U.c;
+  if (!R.idx.length) return;
+  const only = U.hasImpact && v.paid;          // "Only what led to a kill"
+  const idx = only ? R.idx.filter((i) => U.paid[i]) : R.idx;
   // crop to the callouts plus a sample of the data
-  const step = Math.max(1, Math.floor(idx.length / 800));
+  const step = Math.max(1, Math.floor(R.idx.length / 800));     // same crop with or without the filter
   const sample = [];
-  for (let k = 0; k < idx.length; k += step) sample.push({ x: c.x[idx[k]], y: c.y[idx[k]] }, { x: U.lx[idx[k]], y: U.ly[idx[k]] });
+  for (let k = 0; k < R.idx.length; k += step) sample.push({ x: c.x[R.idx[k]], y: c.y[R.idx[k]] }, { x: U.lx[R.idx[k]], y: U.ly[R.idx[k]] });
   const mv = new MapView(cv, meta, [{ pts: sample }]);
   const fo = focusOf(U, R, v);
   const tip = (i) => {
     const a = U.ab[c.ab[i]], g = U.games[c.g[i]], s = U.slot[i];
     const how = LQ_TIP[U.lq[i]] && a.meta.m !== 'self' && a.meta.m !== 'near' ? LQ_TIP[U.lq[i]] : c.yaw[i] == null ? 'position only' : a.meta.m === 'throw' ? MODEL_SHORT.aim : MODEL_SHORT[a.meta.m];
-    return `${abilityIcon(a.id)}<b>${esc(abilityName(a.id))}</b> · ${when(c.t[i])}<span class="muted">${agentIcon(a.agent)}${esc(U.players[c.p[i]].name)} · ${esc(U.teams[g.t[s]].name)}</span><span class="muted">${g.date} vs ${esc(U.teams[g.t[1 - s]].name)} · round ${c.rn[i]} · ${how}</span>`;
+    return `${abilityIcon(a.id)}<b>${esc(abilityName(a.id))}</b> · ${when(c.t[i])}<span class="muted">${agentIcon(a.agent)}${esc(U.players[c.p[i]].name)} · ${esc(U.teams[g.t[s]].name)}</span><span class="muted">${g.date} vs ${esc(U.teams[g.t[1 - s]].name)} · round ${c.rn[i]} · ${how}</span>${U.hasImpact && did(U, i) ? `<span class="muted">${did(U, i)}${U.won[i] === 2 ? '' : ` · round ${U.won[i] ? 'won' : 'lost'}`}</span>` : ''}`;
   };
   const mark = (i, color, alpha, far = false) => {
     const a = U.ab[c.ab[i]];
@@ -572,8 +646,10 @@ export function drawUtil(U, f, v, meta, onFocus) {
         mv.tick(c.x[i], c.y[i], c.x[i] + Math.cos(r) * len, c.y[i] + Math.sin(r) * len, color, alpha);
       }
     }
-    mv.small(R.X[i], R.Y[i], color, tip(i));
+    mv.small(R.X[i], R.Y[i], U.paid[i] ? C.paid : color, tip(i));
   };
+  // Later dots are drawn underneath, so the ones that led to a kill go first.
+  const paidFirst = (list) => [...list.filter((i) => U.paid[i]), ...list.filter((i) => !U.paid[i])];
   const ST = v.who === 'start' && !fo ? starts(U, R) : null;
   const faces = ST && ST.groups.length <= MAX_FACES ? ST.groups : [];
   Promise.all([mv.ready, mv.preload(faces.map((g) => agentImg(g.agent)))]).then(() => {
@@ -588,13 +664,15 @@ export function drawUtil(U, f, v, meta, onFocus) {
     if (v.who === 'after' && !fo) mv.heatPoints((put) => { for (const i of idx) if (c.px[i] != null) put(c.px[i], c.py[i]); }, RAMP_WARM, 0.7);
     let shown = 0, noteText = '';
     if (fo) {
-      for (const i of fo.ids) {
+      for (const i of paidFirst(only ? fo.ids.filter((j) => U.paid[j]) : fo.ids)) {
         if (c.px[i] != null) { if (fo.ids.length <= FOCUS_LINES) mv.tick(c.x[i], c.y[i], c.px[i], c.py[i], C.after, 0.55); mv.speck(c.px[i], c.py[i], C.after); }
         mark(i, C.focus, fo.lineup && fo.ids.length > 40 ? 0.25 : 0.6, Boolean(fo.lineup));
       }
     } else if (showMarks(v, idx.length)) {
       const every = Math.max(1, Math.ceil(idx.length / MAX_MARKS));
-      for (let k = 0; k < idx.length; k += every) { mark(idx[k], C.mark, 0.3); shown++; }
+      const some = [];
+      for (let k = 0; k < idx.length; k += every) some.push(idx[k]);
+      for (const i of paidFirst(some)) { mark(i, C.mark, 0.3); shown++; }
       if (every > 1) noteText = `Showing ${int(shown)} of ${int(idx.length)} uses as dots (every ${every}${every === 2 ? 'nd' : every === 3 ? 'rd' : 'th'}). The heat and the tables count all of them; narrow the filters to see each one.`;
     }
     if (fo && fo.lineup && WALL_SHOT.abilities.includes(fo.a.id) && fo.best <= LQ.WALL) {
@@ -610,6 +688,6 @@ export function drawUtil(U, f, v, meta, onFocus) {
     });
     mv.flush();
     const el = document.querySelector('#utilNote');
-    if (el) el.textContent = noteText || (fo || showMarks(v, idx.length) ? 'Hover a dot for the round it comes from.' : 'Tick “Each use” to see every one as a dot, or narrow the filters: dots turn on by themselves under ' + AUTO_MARKS + ' uses.');
+    if (el) el.textContent = noteText || (only && !idx.length ? 'Nothing in this selection is tied to a kill.' : '') || (fo || showMarks(v, idx.length) ? 'Hover a dot for the round it comes from.' : 'Tick “Each use” to see every one as a dot, or narrow the filters: dots turn on by themselves under ' + AUTO_MARKS + ' uses.');
   });
 }

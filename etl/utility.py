@@ -19,6 +19,12 @@ for abilities that hurt:
 
 Everything that deals no damage (smokes, flashes, recon) has no trace at all,
 so only the caster's position and aim are known.
+
+What a cast did is carried separately in ``im``, for the casts that did
+anything: enemies damaged, damage, kills it finished, assists (through its
+damage, and ones it may have set up) and kills by the caster right after. Each
+game also lists who won every round (``w``), so a spot can be set against the
+side's usual win rate. See ``extract.py`` for how each is derived.
 """
 
 from __future__ import annotations
@@ -51,6 +57,8 @@ NA = -(2 ** 31)
 
 COLS = ("x", "y", "yaw", "pit", "t", "ab", "p", "g", "rn", "k", "px", "py")
 START_COLS = ("x", "y", "p", "g", "k", "a")   # position at barrier drop, player, game, side|slot, agent
+# cast index, enemies damaged, damage, kills, damage assists, possible set-up assists, caster kills after
+IMPACT_COLS = ("i", "h", "d", "k", "a", "s", "f")
 
 
 class _Map:
@@ -63,6 +71,7 @@ class _Map:
         self.rounds = 0
         self.team_games: Counter = Counter()    # team id -> games on this map
         self.obs: dict[int, tuple] = {}         # cast index -> where the enemies it hurt stood
+        self.im = {k: array("i") for k in IMPACT_COLS}
         self.agents: dict[str, int] = {}
         self.s = {k: array("i") for k in START_COLS}
         self.c = {k: array("i") for k in COLS}
@@ -75,8 +84,10 @@ def _idx(table: dict, key) -> int:
 
 
 class UtilBuilder:
-    def __init__(self, after_s: int):
+    def __init__(self, after_s: int, setup_s: int, follow_s: int):
         self.after_s = after_s
+        self.setup_s = setup_s      # window tying an assist without damage to a cast
+        self.follow_s = follow_s    # window for "the caster got a kill right after"
         self.maps: dict[str, _Map] = {}
         self.team_names: dict[str, str] = {}
         self.player_names: dict[str, str] = {}
@@ -93,6 +104,7 @@ class UtilBuilder:
         gi = len(M.games)
         side_rounds = [[0, 0], [0, 0]]      # per team slot: [attack rounds, defense rounds]
         plants = []
+        wins = []                           # [round, winning slot, 1 if slot 0 defends (-1 unknown)]
         c = M.c
         for r in g["rounds"]:
             for tid in tids:
@@ -101,6 +113,8 @@ class UtilBuilder:
                     side_rounds[slot[tid]][sd == "d"] += 1
             if r["plant"] is not None:
                 plants.append([r["n"], r["plant"]])
+            if r["winner"] in slot:
+                wins.append([r["n"], slot[r["winner"]], {"a": 0, "d": 1}.get(r["sides"].get(tids[0]), -1)])
             for pid, (sx, sy) in (r.get("st") or {}).items():
                 p = g["players"].get(pid)
                 sd = r["sides"].get(p["team"]) if p else None
@@ -122,7 +136,7 @@ class UtilBuilder:
                 # Only an unambiguous hit is used for fitting: one cast of that
                 # ability by that player before the damage.
                 hit = None
-                if len(u) > 10 and len(seen[(pid, ab)]) == 1 and (ab in STATIC or u[12] <= HIT_WINDOW_S):
+                if u[10] is not None and len(seen[(pid, ab)]) == 1 and (ab in STATIC or u[12] <= HIT_WINDOW_S):
                     hit = (u[10], u[11])
                     if yaw is not None:
                         a = math.radians(yaw)
@@ -136,6 +150,9 @@ class UtilBuilder:
                     continue
                 if hit and ab in SPOT:
                     M.obs[len(c["x"])] = hit
+                if any(u[13:19]):
+                    for k, val in zip(IMPACT_COLS, (len(c["x"]), *u[13:19])):
+                        M.im[k].append(val)
                 c["x"].append(x)
                 c["y"].append(y)
                 c["yaw"].append(NA if yaw is None else yaw)
@@ -156,7 +173,7 @@ class UtilBuilder:
             "ev": _idx(M.events, s["event"]),
             "t": [_idx(M.teams, tid) for tid in tids],
             "ag": [sorted({p["agent"] for p in g["players"].values() if p["team"] == tid}) for tid in tids],
-            "sr": side_rounds, "pl": plants,
+            "sr": side_rounds, "pl": plants, "w": wins,
         })
 
     def _calibration(self) -> dict:
@@ -221,7 +238,7 @@ class UtilBuilder:
         for old in out_dir.glob("*.json"):
             old.unlink()
         index_maps = {}
-        total = size = n_obs = n_match = 0
+        total = size = n_obs = n_match = n_did = 0
         for name, M in sorted(self.maps.items()):
             n = len(M.c["x"])
             if not n:
@@ -232,6 +249,7 @@ class UtilBuilder:
                            + [(i, x, y, 1) for i, (x, y) in matched.items()])
             n_obs += len(M.obs)
             n_match += len(matched)
+            n_did += len(M.im["i"])
             doc = {
                 "map": name,
                 "teams": [{"id": t, "name": self.team_names.get(t, t)} for t in M.teams],
@@ -245,6 +263,8 @@ class UtilBuilder:
                 # landing spots known from damage: cast index, x, y, 2 = observed / 1 = matched
                 "o": {"i": [k[0] for k in known], "x": [k[1] for k in known],
                       "y": [k[2] for k in known], "q": [k[3] for k in known]},
+                # what a cast did, for the casts that did anything (see IMPACT_COLS)
+                "im": {k: M.im[k].tolist() for k in IMPACT_COLS},
             }
             path = out_dir / f"{name}.json"
             with open(path, "w", encoding="utf-8") as f:
@@ -254,7 +274,9 @@ class UtilBuilder:
             index_maps[name] = {"casts": n, "games": len(M.games), "rounds": M.rounds,
                                 "teams": dict(M.team_games)}
         with open(out_dir / "index.json", "w", encoding="utf-8") as f:
-            json.dump({"after": self.after_s, "maps": index_maps, "fit": self._calibration()},
+            json.dump({"after": self.after_s, "setup": self.setup_s, "follow": self.follow_s,
+                       "maps": index_maps, "fit": self._calibration()},
                       f, separators=(",", ":"))
         return (f"{total:,} ability casts on {len(index_maps)} maps, {size / 1e6:.0f} MB of utility files; "
-                f"landing observed for {n_obs:,}, matched to an identical throw for {n_match:,}")
+                f"landing observed for {n_obs:,}, matched to an identical throw for {n_match:,}; "
+                f"{n_did:,} casts hurt someone or are tied to a kill")

@@ -17,7 +17,7 @@ const S = {
   mode: 'home',              // 'home' = team picker, 'team' = one team's tabs, 'league' = league-wide stats, 'util' = utility map
   UI: null, U: null,         // utility: index of maps, and the map on screen
   uf: { ...UTIL_DEFAULT },
-  uv: { src: 'from', heat: true, pts: null, spots: true, who: 'off', focus: null },   // pts null = automatic; who = player-position layer
+  uv: { src: 'from', heat: true, pts: null, spots: true, who: 'off', focus: null, paid: false, vsort: 'new' },   // pts null = automatic; who = player-position layer
   hf: { comp: 'all' },       // picker: competition
   hv: { q: '', sort: 'az' },
   L: null, hasAssets: false, push: false,
@@ -974,13 +974,14 @@ function wire() {
 
   const view = $('#view');
   view.addEventListener('click', (e) => {
-    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more],[data-spot],[data-jump],[data-hsort],[data-uability],[data-ufocus],[data-usrc],[data-uteam],[data-uwho]');
+    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more],[data-spot],[data-jump],[data-hsort],[data-uability],[data-ufocus],[data-usrc],[data-uteam],[data-uwho],[data-uvsort]');
     if (!el || e.target.closest('select,input,label')) return;
     const d = el.dataset;
     if (d.uability) setUtil({ ability: S.uf.ability === d.uability ? 'all' : d.uability });
     else if (d.ufocus != null) { S.uv.focus = d.ufocus && S.uv.focus !== d.ufocus ? d.ufocus : null; render(); }
     else if (d.usrc) { S.uv.src = d.usrc; S.uv.focus = null; render(); }
     else if (d.uwho) { S.uv.who = d.uwho; render(); }
+    else if (d.uvsort) { S.uv.vsort = d.uvsort; render(); }
     else if (d.uteam) setUtil({ team: d.uteam });
     else if (d.team) goTeam(d.team, { pid: d.pid, carry: true });
     else if (d.hsort) { S.hv.sort = d.hsort; render(); }
@@ -997,7 +998,7 @@ function wire() {
   view.addEventListener('change', (e) => {
     const t = e.target;
     if (t.dataset.layer) { S.layers[t.dataset.layer] = t.checked; drawMapTab(); }
-    if (t.dataset.ulayer) { S.uv[t.dataset.ulayer] = t.checked; drawUtilMap(); }
+    if (t.dataset.ulayer) { S.uv[t.dataset.ulayer] = t.checked; if (t.dataset.ulayer === 'paid') render(); else drawUtilMap(); }   // paid changes how many dots there are
   });
   view.addEventListener('input', (e) => {
     const t = e.target;

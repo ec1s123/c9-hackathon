@@ -81,6 +81,12 @@ export const ABILITY = {
   // Yoru
   'gatecrash': A('self', 'aim'), 'blindside': A('flash', 'aim'), 'fakeout': A('flash', 'ray'), 'dimensional-drift': A('self', 'self'),
 };
+// Types that can earn an assist without dealing damage: they blind, stun, slow or reveal.
+// A kill names who assisted but not how, so the build marks every ability the assister used
+// shortly before it; the mark only counts for these. Smokes and movement are left out because
+// nothing they do earns an assist (smokes of agents with no flash or stun show almost none),
+// and traps because one can trigger long after it was placed.
+export const SETS_UP = new Set(['flash', 'cc', 'recon']);
 const UNKNOWN = A('other', 'aim');
 export const abilityMeta = (id) => ABILITY[id] || UNKNOWN;
 

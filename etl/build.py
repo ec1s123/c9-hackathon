@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from extract import AFTER_S, EXTRACT_VERSION, OP_COST, extract_series  # noqa: E402
+from extract import AFTER_S, EXTRACT_VERSION, FOLLOW_S, OP_COST, SETUP_S, extract_series  # noqa: E402
 from utility import UtilBuilder  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,7 +107,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
     lg_team = defaultdict(lambda: [0] * 4)
     lg_names: dict[str, str] = {}
     lg_games = defaultdict(int)      # (team, event) -> maps played
-    util = UtilBuilder(AFTER_S)
+    util = UtilBuilder(AFTER_S, SETUP_S, FOLLOW_S)
     n_games = n_rounds = n_ops = 0
     missing = []
 

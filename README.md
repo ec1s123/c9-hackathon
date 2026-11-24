@@ -3,8 +3,8 @@
 Scouting tool for how a VALORANT team uses the Operator: who buys it and when,
 where they play it from, when their shots land, and where they go after a kill.
 It also maps every team's utility: where each ability gets used on each map and
-side, when in the round, what is stacked together, and where the player goes
-next. Built on the Sky's The Limit 2026 hackathon GRID data.
+side, when in the round, what is stacked together, where the player goes
+next, and what it did: damage, kills, assists and how the round went. Built on the Sky's The Limit 2026 hackathon GRID data.
 
 ## Run it
 
@@ -92,6 +92,19 @@ and the time) is exact for every ability.
   team, same round.
 - **Players: 5 s after use**: where the player is five seconds after using the
   ability, as the same orange layer.
+- **What pays off**: under the map, one row per ability in the selection: how
+  many uses led to a kill, the kills and assists behind that, how often it hurt
+  someone and for how much, how often the player got a kill of their own right
+  after, and how the rounds it was used in went next to the side's usual win
+  rate. Click a row to narrow to that ability. The same "Led to a kill" share
+  is a column on common spots, repeated lineups, used together and the player
+  and team tables, so any of them can be read as "which of this do we have to
+  respect".
+- **Drilling into one spot**: isolating a spot, lineup or pair adds a summary
+  of what it did and two columns to the VOD list (what each use did, and
+  whether the round was won). "What worked first" puts the uses tied to a kill
+  at the top. On the map those uses are yellow, and "Only what led to a kill"
+  hides everything else, heat included.
 
 What the data can and cannot say about where an ability ends up:
 
@@ -120,6 +133,29 @@ The one trace an ability leaves is damage, and the build uses it three ways:
 3. **Fitted.** Otherwise the distance from thrower to victim, along the aim, is
    tabulated against the aim's pitch (`fit` in `data/util/index.json`) and read
    off that table: median 5 to 9 m by the same test. No walls are modelled.
+
+What the data can say about what an ability did (`etl/extract.py`):
+
+- **Damage** is recorded: every hit names the ability. It goes to that
+  player's latest use of it.
+- **Kills**: a kill names a weapon only when it is a gun, so an ability kill is
+  a kill whose last hit (within 0.2 s) was the ability.
+- **Assists through damage**: each kill lists who assisted. If the assister had
+  damaged the victim with an ability that round, each such use gets the assist.
+- **Assists without damage**: an assister who never damaged the victim earned
+  it some other way, and the feed does not say how (there is no flashed or
+  stunned state anywhere in it). Each ability they used in the 10 s before the
+  kill is marked, and the mark counts only for flashes, stuns and slows, and
+  recon (`SETS_UP` in `web/utilmeta.js`). This is the likeliest cause, not a
+  recorded one: two such abilities in the window both get it. Smokes are left
+  out because they cannot earn one (smokes of agents with no flash or stun
+  show almost none), traps because one can trigger long after it was placed.
+- **Led to a kill** = a kill or either kind of assist. Flashes a player uses
+  for themselves earn no assist, so they show up only under "own kill within
+  5 s", which is a coincidence in time and is kept out of the headline.
+- **Rounds won** counts each round once, however many times the spot was used
+  in it. It says what happened in those rounds, not that the utility caused it:
+  post-plant utility only exists in rounds where the spike went down.
 
 **The bow.** How hard it was drawn and how many bounces were set are not
 recorded, and no arrow speed fits the shock bolts that hit someone, so a
@@ -202,7 +238,8 @@ The feed has no purchase events and no weapon-pickup events, so:
   buy-phase casts, five seconds into the round), from the same irregular
   position samples as the Operator tracks. Blank if they died first.
 - **Areas**: nearest callout label to the position. Approximate near borders.
-- Kills after the round is already decided are left out.
+- Kills after the round is already decided are left out, and so earn no
+  ability a kill or an assist.
 
 Checked against the feeds' own final box scores on 40 random series: round
 counts match exactly, Operator kills 368 of 369.
@@ -212,8 +249,9 @@ counts match exactly, Operator kills 368 of 369.
 ```
 etl/extract.py     one series feed (+ its ability supplement) -> per-round records
 etl/build.py       runs extract over every series in parallel, writes data/
-etl/utility.py     every ability cast -> data/util/<map>.json, plus the
-                   throw-distance tables fitted from damage events
+etl/utility.py     every ability cast -> data/util/<map>.json, with what each
+                   cast did and who won each round, plus the throw-distance
+                   tables fitted from damage events
 etl/fetch_maps.py  minimaps and callouts from valorant-api.com
 etl/fetch_assets.py  agent, ability and weapon icons from valorant-api.com,
                    team logos from vlr.gg (exact name matches only)
@@ -222,8 +260,10 @@ web/               no-build front end (ES modules, canvas, SVG)
   home.js          team picker (first screen)
   league.js        league stats view and the roll-ups behind the picker
                    (both read data/league.json)
-  utility.js       utility map: filters, heat, common spots, used together
-  utilmeta.js      what each ability is and how its landing spot is known
+  utility.js       utility map: filters, heat, common spots, used together,
+                   what pays off
+  utilmeta.js      what each ability is, how its landing spot is known and
+                   whether it can earn an assist without damage
   search.js        search box behaviour
   icons.js         logos and icons, with monogram fallbacks
 serve.py           local static server
