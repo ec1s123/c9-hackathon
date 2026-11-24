@@ -19,6 +19,7 @@
   <nav class="nav" id="nav" aria-label="Pages">
     <button data-nav="home">Teams</button>
     <button data-nav="league">League stats</button>
+    <button data-nav="util">Utility</button>
   </nav>
   <div class="search">
     <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M13 13l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -39,6 +40,7 @@
   <button data-tab="rotations">Rotations</button>
   <button data-tab="economy">Economy</button>
   <button data-tab="rounds">Rounds</button>
+  <button data-tab="util" class="out" title="Where this team's utility goes, on the map">Utility<span aria-hidden="true"> ↗</span></button>
 </nav>
 
 <main id="view"></main>
@@ -47,7 +49,9 @@
 <footer class="foot muted">
   Built from GRID event feeds (Sky's The Limit 2026 hackathon data). Positions are sampled whenever any player
   uses an ability, deals damage or gets a kill, so tracks are approximate. Missed shots are not recorded: “Operator
-  shots” here always means shots that hit. Callout names are nearest-label estimates. Agent, ability and weapon
+  shots” here always means shots that hit. Callout names are nearest-label estimates.
+  Utility: every ability use has the player's exact position and aim, but no feed records where an ability lands, so
+  landing spots are shown only for abilities placed at the player's feet or estimated from the throw angle. Agent, ability and weapon
   art belongs to Riot Games and team logos to the teams; they are shown locally and are not part of this project.
 </footer>
 <script type="module" src="app.js"></script>

@@ -10,6 +10,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : '');
 const img = (cls, src, label) => `<img class="ico ${cls}" src="${DATA}${esc(src)}" alt="" title="${esc(label)}" loading="lazy" decoding="async">`;
 
+/** Path of an agent's portrait, for drawing on a canvas. */
+export const agentImg = (key) => (A.agents[key] ? DATA + A.agents[key].img : null);
 export const agentName = (key) => (A.agents[key] ? A.agents[key].name : cap(key));
 export const agentRole = (key) => (A.agents[key] ? A.agents[key].role : '');
 export const abilityName = (id) => (A.abilities[id] ? A.abilities[id].name : cap(String(id).replace(/-/g, ' ')));

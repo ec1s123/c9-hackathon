@@ -1,10 +1,11 @@
 // Operator Tracker - no-build front end. Reads ../data/ produced by etl/build.py.
 import { barChart, barList, legend, tile } from './charts.js';
-import { MapView, zoneOf } from './map.js';
+import { MapView, zoneOf, walkableFor } from './map.js';
 import { setAssets, teamLogo, agentIcon, agentTag, agentName, abilityIcon, abilityName, weaponIcon, opIcon } from './icons.js';
 import { prepLeague, cleanLeagueFilters, describeLeague, leagueFilters, viewLeague, circuitOf } from './league.js';
 import { homeHero, homeGrid } from './home.js';
 import { initSearch } from './search.js';
+import { UTIL_DEFAULT, prepUtil, cleanUtil, utilHero, utilFilters, utilPreset, viewUtil, drawUtil } from './utility.js';
 
 const DATA = '../data/';
 const C = { atk: '#d95926', def: '#3987e5', kill: '#199e70', neutral: '#6f6e68' };
@@ -13,7 +14,10 @@ const SIDE = { a: 'Attack', d: 'Defense' };
 
 const S = {
   index: null, maps: {}, T: null, tab: 'overview',
-  mode: 'home',              // 'home' = team picker, 'team' = one team's tabs, 'league' = league-wide stats
+  mode: 'home',              // 'home' = team picker, 'team' = one team's tabs, 'league' = league-wide stats, 'util' = utility map
+  UI: null, U: null,         // utility: index of maps, and the map on screen
+  uf: { ...UTIL_DEFAULT },
+  uv: { src: 'from', heat: true, pts: null, spots: true, who: 'off', focus: null },   // pts null = automatic; who = player-position layer
   hf: { comp: 'all' },       // picker: competition
   hv: { q: '', sort: 'az' },
   L: null, hasAssets: false, push: false,
@@ -77,6 +81,31 @@ async function loadTeam(id) {
   S.T = T; S.sel = null; S.mapPick = null;
   Object.keys(S.f).forEach((k) => (S.f[k] = 'all'));
   return true;
+}
+
+// ---------------------------------------------------------------- utility data
+const utilCache = new Map();
+/** Load (once) the map the utility filters point at. Resolves false if a newer pick won the race. */
+async function loadUtil() {
+  const m = S.uf.map;
+  if (!utilCache.has(m)) {
+    S.U = null;
+    if (util()) render();                              // shows "Loading…"
+    const U = await getJSON(`util/${m}.json`, true);
+    if (U) utilCache.set(m, prepUtil(U, S.UI, S.maps[m], await walkableFor(S.maps[m])));
+  }
+  if (S.uf.map !== m) return false;
+  S.U = utilCache.get(m) || null;
+  cleanUtil(S.uf, S.U);
+  return true;
+}
+/** The map to open first: the one asked for, the one already open, the team's most played, or the biggest. */
+function utilMap(want, team) {
+  const maps = S.UI.maps;
+  if (want && maps[want]) return want;
+  if (S.uf.map && maps[S.uf.map] && (!team || maps[S.uf.map].teams[team])) return S.uf.map;
+  const rank = Object.entries(maps).sort((a, b) => (team ? (b[1].teams[team] || 0) - (a[1].teams[team] || 0) : 0) || b[1].games - a[1].games);
+  return rank[0][0];
 }
 
 // ---------------------------------------------------------------- filters
@@ -711,12 +740,14 @@ function openRound(o) { S.sel = o; setTab('rounds'); }
 const VIEWS = { overview: viewOverview, map: viewMap, timing: viewTiming, rotations: viewRotations, economy: viewEconomy, rounds: viewRounds };
 const league = () => S.mode === 'league';
 const home = () => S.mode === 'home';
+const util = () => S.mode === 'util';
 const homeState = () => ({ comp: S.hf.comp, ...S.hv });
 
 function urlFor() {
   const q = new URLSearchParams();
   if (home()) { if (S.hf.comp !== 'all') q.set('comp', S.hf.comp); }
   else if (league()) { q.set('view', 'league'); Object.entries(S.lf).forEach(([k, v]) => { if (v !== 'all') q.set(k, v); }); }
+  else if (util()) { q.set('view', 'util'); Object.entries(S.uf).forEach(([k, v]) => { if (v !== '' && (k === 'side' || v !== UTIL_DEFAULT[k])) q.set(k, v); }); }
   else {
     q.set('team', S.T.team.id);
     if (S.tab !== 'overview') q.set('tab', S.tab);
@@ -727,7 +758,7 @@ function urlFor() {
 }
 
 function render() {
-  if (S.mode === 'team' ? !S.T : !S.L) return;
+  if (S.mode === 'team' ? !S.T : util() ? !S.UI : !S.L) return;
   // The filter bar is rebuilt each time; put keyboard focus back where it was.
   const act = document.activeElement;
   const focusKey = act && act.closest && act.closest('#filters') && act.dataset.f ? [act.dataset.f, act.dataset.v] : null;
@@ -736,11 +767,11 @@ function render() {
   $('#filters').hidden = home();
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
   document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.nav === S.mode));
-  document.title = S.mode === 'team' ? `${S.T.team.name} · Operator Tracker` : league() ? 'League stats · Operator Tracker' : 'Operator Tracker';
+  document.title = S.mode === 'team' ? `${S.T.team.name} · Operator Tracker` : league() ? 'League stats · Operator Tracker' : util() ? `Utility${S.uf.map ? ' on ' + cap(S.uf.map) : ''} · Operator Tracker` : 'Operator Tracker';
   S.shownMap = null;
-  const viewHtml = home() ? homeGrid(S.L, homeState()) : league() ? viewLeague(S.L, { f: S.lf, ...S.lv }) : teamView();   // before the header: it reads shownMap
-  $('#hero').innerHTML = home() ? homeHero(S.L, homeState()) + assetHint() : league() ? leagueHero() : teamHero();
-  $('#filters').innerHTML = home() ? '' : league() ? leagueFilters(S.L, S.lf) : teamFilters();
+  const viewHtml = home() ? homeGrid(S.L, homeState()) : league() ? viewLeague(S.L, { f: S.lf, ...S.lv }) : util() ? viewUtil(S.U, S.uf, S.uv, S.maps, S.index) : teamView();   // before the header: it reads shownMap
+  $('#hero').innerHTML = home() ? homeHero(S.L, homeState()) + assetHint() : league() ? leagueHero() : util() ? utilHero(S.UI, S.uf, S.maps, S.index) + assetHint() : teamHero();
+  $('#filters').innerHTML = home() ? '' : league() ? leagueFilters(S.L, S.lf) : util() ? utilFilters(S.U, S.uf, S.index) : teamFilters();
   $('#view').innerHTML = viewHtml;
   if (focusKey) { const el = [...document.querySelectorAll('#filters [data-f]')].find((x) => x.dataset.f === focusKey[0] && x.dataset.v === focusKey[1]); if (el) el.focus(); }
   if (S.mode === 'team') {
@@ -748,11 +779,13 @@ function render() {
     if (S.tab === 'rotations') drawRotations();
     if (S.tab === 'rounds') drawReplay();
   }
+  if (util()) drawUtilMap();
   const u = urlFor();
   if (u !== location.pathname + location.search) history[S.push ? 'pushState' : 'replaceState'](null, '', u);
   S.push = false;
 }
 function setTab(t) {
+  if (t === 'util') { goUtil({ team: S.T.team.id, map: S.f.map !== 'all' ? S.f.map : null, side: S.f.side !== 'all' ? S.f.side : 'd' }); return; }
   if (t !== S.tab) S.push = true;       // tabs and players are steps Back should undo; other filters are not
   S.tab = t;
   render();
@@ -778,6 +811,34 @@ function goLeague(filters) {
   render();
   window.scrollTo({ top: 0 });
 }
+/** The utility map. filters = any of S.uf's keys; the rest reset. */
+async function goUtil(filters = {}) {
+  if (!S.UI) { $('#view').innerHTML = empty('No utility data yet. Run <code>python3 etl/build.py</code> from the project folder, then reload.'); return; }
+  const keep = util() ? S.uf : {};
+  S.uf = { ...UTIL_DEFAULT, team: keep.team || 'all', side: keep.side || 'd', ...filters };
+  S.uf.map = utilMap(filters.map, S.uf.team !== 'all' ? S.uf.team : null);
+  S.uv.focus = null;
+  S.mode = 'util'; S.push = true;
+  if (!(await loadUtil())) return;
+  render();
+  window.scrollTo({ top: 0 });
+}
+/** Change utility filters, keeping them consistent with each other. */
+async function setUtil(patch) {
+  const f = S.uf;
+  Object.assign(f, patch);
+  if ('agent' in patch) f.ability = 'all';
+  if ('role' in patch || 'kind' in patch) { f.ability = 'all'; if ('role' in patch) f.agent = 'all'; }
+  if ('team' in patch) S.push = true;
+  S.uv.focus = null;
+  if ('map' in patch) { S.push = true; if (!(await loadUtil())) return; }
+  cleanUtil(f, S.U);
+  render();
+}
+function drawUtilMap() {
+  drawUtil(S.U, S.uf, S.uv, S.maps[S.uf.map], (key) => { S.uv.focus = key; render(); });
+}
+
 /** Open a team. pid = GRID player id to filter to; carry = bring the current page's filters along. */
 async function goTeam(id, { pid, carry = false } = {}) {
   const from = S.mode, lf = { ...S.lf }, comp = S.hf.comp;
@@ -801,6 +862,16 @@ async function route() {
   const q = new URLSearchParams(location.search);
   let team = q.get('team');
   if (!S.index.teams.some((t) => t.id === team)) team = null;
+  if (q.get('view') === 'util' && S.UI) {
+    S.mode = 'util';
+    Object.keys(S.uf).forEach((k) => (S.uf[k] = q.get(k) || UTIL_DEFAULT[k]));
+    if (!team) S.uf.team = 'all';
+    S.uf.map = utilMap(q.get('map'), team);
+    S.uv.focus = null;
+    if (!(await loadUtil())) return;
+    render();
+    return;
+  }
   if (!team && !S.L) team = (S.index.teams.find((t) => t.name === 'Cloud9') || S.index.teams[0]).id;
   if (team) {
     if (!S.T || S.T.team.id !== team) { if (!(await loadTeam(team))) return; }
@@ -822,6 +893,7 @@ async function route() {
 }
 
 function setFilter(key, v, toggle = false) {
+  if (util()) { if (key in S.uf) setUtil({ [key]: toggle && String(S.uf[key]) === String(v) ? 'all' : v }); return; }
   const f = league() ? S.lf : S.f;
   if (!(key in f)) return;
   const next = toggle && String(f[key]) === String(v) ? 'all' : v;
@@ -870,7 +942,7 @@ function searchResults(query) {
 function wire() {
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
   $('#home').addEventListener('click', (e) => { if (!S.L || e.metaKey || e.ctrlKey) return; e.preventDefault(); goHome(); });
-  $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.nav === 'home') goHome(); else goLeague(); });
+  $('#nav').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.nav === 'home') goHome(); else if (b.dataset.nav === 'util') goUtil(); else goLeague(); });
 
   const filters = $('#filters');
   filters.addEventListener('change', (e) => { if (e.target.dataset.f) setFilter(e.target.dataset.f, e.target.value); });
@@ -878,6 +950,7 @@ function wire() {
     const b = e.target.closest('button');
     if (!b) return;
     if (b.dataset.f) setFilter(b.dataset.f, b.dataset.v);
+    else if ('reset' in b.dataset && util()) setUtil({ ...utilPreset(0), team: 'all', comp: 'all' });   // back to pre-round, every team
     else if ('reset' in b.dataset) { const f = league() ? S.lf : S.f; Object.keys(f).forEach((k) => (f[k] = 'all')); render(); }
   });
 
@@ -885,6 +958,9 @@ function wire() {
     const b = e.target.closest('button');
     if (!b) return;
     if (b.dataset.go === 'home') goHome();
+    else if (b.dataset.go === 'uteam') goTeam(S.uf.team);
+    else if (b.dataset.upreset) setUtil(utilPreset(+b.dataset.upreset));
+    else if (b.dataset.map && util()) setUtil({ map: b.dataset.map });
     else if (b.dataset.comp) { S.hf.comp = b.dataset.comp; render(); const again = [...document.querySelectorAll('#hero [data-comp]')].find((x) => x.dataset.comp === S.hf.comp); if (again) again.focus(); }
     else if (b.dataset.go === 'team') setFilter('player', 'all');
     else if (b.dataset.player != null) setFilter('player', b.dataset.player);
@@ -898,10 +974,15 @@ function wire() {
 
   const view = $('#view');
   view.addEventListener('click', (e) => {
-    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more],[data-spot],[data-jump],[data-hsort]');
+    const el = e.target.closest('[data-team],[data-player],[data-map],[data-agent],[data-op],[data-sortp],[data-sortt],[data-more],[data-spot],[data-jump],[data-hsort],[data-uability],[data-ufocus],[data-usrc],[data-uteam],[data-uwho]');
     if (!el || e.target.closest('select,input,label')) return;
     const d = el.dataset;
-    if (d.team) goTeam(d.team, { pid: d.pid, carry: true });
+    if (d.uability) setUtil({ ability: S.uf.ability === d.uability ? 'all' : d.uability });
+    else if (d.ufocus != null) { S.uv.focus = d.ufocus && S.uv.focus !== d.ufocus ? d.ufocus : null; render(); }
+    else if (d.usrc) { S.uv.src = d.usrc; S.uv.focus = null; render(); }
+    else if (d.uwho) { S.uv.who = d.uwho; render(); }
+    else if (d.uteam) setUtil({ team: d.uteam });
+    else if (d.team) goTeam(d.team, { pid: d.pid, carry: true });
     else if (d.hsort) { S.hv.sort = d.hsort; render(); }
     else if (d.spot) { S.f.map = d.spot; S.layers[d.layer] = true; S.push = true; setTab('map'); }
     else if (d.jump) { S.push = true; setTab(d.jump); }
@@ -916,6 +997,7 @@ function wire() {
   view.addEventListener('change', (e) => {
     const t = e.target;
     if (t.dataset.layer) { S.layers[t.dataset.layer] = t.checked; drawMapTab(); }
+    if (t.dataset.ulayer) { S.uv[t.dataset.ulayer] = t.checked; drawUtilMap(); }
   });
   view.addEventListener('input', (e) => {
     const t = e.target;
@@ -953,7 +1035,8 @@ async function main() {
     $('#view').innerHTML = empty('No data yet. Run <code>python3 etl/build.py</code> from the project folder, then reload.');
     return;
   }
-  const [maps, assets, L] = await Promise.all([getJSON('maps.json', true), getJSON('assets.json', true), getJSON('league.json', true)]);
+  const [maps, assets, L, UI] = await Promise.all([getJSON('maps.json', true), getJSON('assets.json', true), getJSON('league.json', true), getJSON('util/index.json', true)]);
+  S.UI = UI && Object.keys(UI.maps).length ? UI : null;
   S.maps = maps || {};
   S.hasAssets = Boolean(assets);
   setAssets(assets);

@@ -326,3 +326,17 @@ h2 .ico.op { margin-right: 10px; }
 .who-btn .ct { color: var(--muted); font-variant-numeric: tabular-nums; }
 .ctx-note { font-size: 12px; color: var(--muted); }
 h2 .ico.mapthumb { width: 26px; height: 26px; margin-right: 8px; }
+
+/* ---------------------------------------------------------------- utility */
+.tabs button.out { margin-left: auto; color: var(--link); }
+.filters .seg { flex-wrap: wrap; }
+.ufocus { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; background: var(--surface-2); border-left: 3px solid var(--kill); font-size: 13px; color: var(--text-2); }
+.ufocus b { color: var(--text); }
+.ufocus button { align-self: center; }
+td .tag .ico.glyph { margin-right: 0; }
+.bars .lab .ico.glyph { margin-left: 2px; }
+body[data-mode=util] .scroll { max-height: 420px; }
+.ctl-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.picks.habits { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.picks.habits .pick { grid-template-areas: "ico main stat" "meter meter meter"; }
+.picks.habits .pk-main b { display: inline-flex; align-items: center; white-space: normal; }

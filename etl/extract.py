@@ -13,11 +13,23 @@ What the feed gives us (and what it does not):
 * Weapon pickups are not events (only the spike is). A mid-round Operator
   pickup is detected when a player who did not start the round with one deals
   Operator damage.
+* Ability casts are events, but GRID's position on them is 2D and can lag. The
+  ability supplement gives the caster's exact position and aim for each cast.
+  Its extra records that GRID does not report all sit in the second between
+  two rounds (charges refilling), so they are not casts and are left out. No
+  feed says where an ability lands: the only trace is the position of the
+  enemies it damaged.
+* When a round is restarted the feed takes its casts back
+  (``player-!used-ability``) and re-applies them with new ids and stale
+  times. Taken-back casts are removed and re-applied ones are not counted.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
+from bisect import bisect_left
 from datetime import datetime
 
 try:  # Python 3.14+
@@ -27,7 +39,8 @@ except ImportError:  # pragma: no cover - older Pythons
 
 OP = "operator"
 OP_COST = 4700
-EXTRACT_VERSION = 3
+EXTRACT_VERSION = 6
+AFTER_S = 5   # "where are they after using it": seconds after the cast
 
 SHIELDS = ("heavyshield", "lightshield", "regenshield")
 # Rough price order, used to pick the "main" weapon out of an inventory.
@@ -75,9 +88,58 @@ def _current_game(games: list[dict]):
     return (live or started)[-1]
 
 
+def _frame(c: dict):
+    """Caster position and aim for one supplement record: (x, y, yaw, pitch) or None."""
+    q = c.get("quality")
+    fr = c.get("interpolated")
+    if q == "gap_exceeded":
+        # One of the two samples is from another moment (often the next round).
+        near = [f for f in (c.get("frame_before"), c.get("frame_after")) if f]
+        fr = min(near, key=lambda f: abs(f["offset_ms"])) if near else None
+        if fr and abs(fr["offset_ms"]) > 1500:
+            fr = None
+    if not fr or not fr.get("position") or not fr.get("view"):
+        return None
+    p, v = fr["position"], fr["view"]
+    flat = math.hypot(v["x"], v["y"])
+    return (round(p["x"]), round(p["y"]),
+            round(math.degrees(math.atan2(v["y"], v["x"]))) % 360,
+            round(math.degrees(math.atan2(v["z"], flat))))
+
+
+def load_supplement(path: str | None) -> dict[str, tuple]:
+    """-> {GRID event id: (x, y, yaw, pitch)} for every cast GRID also reports."""
+    by_event: dict[str, tuple] = {}
+    if not path or not os.path.exists(path):
+        return by_event
+    with zstd.open(path, "rt", encoding="utf-8") as fh:
+        for line in fh:
+            c = json.loads(line)
+            if not c.get("in_grid") or not c.get("grid_event_id"):
+                continue
+            fr = _frame(c)
+            if fr is not None:
+                by_event[c["grid_event_id"]] = fr
+    return by_event
+
+
+def _pos_at(track: list, t: float):
+    """Position at round time t from (t, x, y) samples, or None if it is not covered."""
+    if not track:
+        return None
+    i = bisect_left(track, (t,))
+    a = track[i - 1] if i > 0 else None
+    b = track[i] if i < len(track) else None
+    if a and b and b[0] - a[0] <= 8:
+        w = (t - a[0]) / (b[0] - a[0]) if b[0] > a[0] else 0
+        return round(a[1] + (b[1] - a[1]) * w), round(a[2] + (b[2] - a[2]) * w)
+    near = min((s for s in (a, b) if s), key=lambda s: abs(s[0] - t))
+    return (near[1], near[2]) if abs(near[0] - t) <= 3 else None
+
+
 class _Round:
     __slots__ = ("n", "t_start", "t0", "t_end", "sides", "winner", "win_type",
-                 "plant", "P", "dmg", "kills", "abil", "ended")
+                 "plant", "P", "dmg", "kills", "abil", "util", "ended")
 
     def __init__(self, n: int, t_start: float):
         self.n = n
@@ -92,11 +154,13 @@ class _Round:
         self.dmg = []
         self.kills = []
         self.abil = []
+        self.util = []       # every cast from the start of the buy phase
         self.ended = False
 
 
-def extract_series(path: str, valid_games: set[str]) -> dict:
+def extract_series(path: str, valid_games: set[str], supplement: str | None = None) -> dict:
     """Stream one series file and return ``{"v": .., "games": [..]}``."""
+    supp = load_supplement(supplement)
     games: dict[str, dict] = {}
     rnd: _Round | None = None
     rnd_game: str | None = None
@@ -144,10 +208,33 @@ def extract_series(path: str, valid_games: set[str]) -> dict:
                 "abil": [[a["t"], a["id"], a["x"], a["y"]] for a in r.abil if a["a"] == pid],
                 "ft": taken[0]["t"] if taken else None,
             }
+        # Utility: every cast from the start of the buy phase to the end of the round.
+        dur = t_end - r.t0
+        died = {}
+        for k in r.kills:
+            died.setdefault(k["v"], k["t"])
+        out_util = []
+        for c in r.util:
+            rt = round(c["T"] - r.t0, 1)
+            x, y, yaw, pit = c["fr"]
+            # Where the caster is AFTER_S seconds later (for buy-phase casts:
+            # AFTER_S seconds into the round).
+            ta = max(rt, 0) + AFTER_S
+            after = None
+            if ta <= dur and died.get(c["a"], 1e9) >= ta:
+                after = _pos_at(r.P[c["a"]]["track"], ta)
+            row = [rt, c["a"], c["id"], x, y, yaw, pit,
+                   after[0] if after else None, after[1] if after else None, c["src"]]
+            if "hits" in c:  # enemies it damaged: where they stood (mean), delay to the first, how many
+                hs = list(c["hits"].values())
+                row += [round(sum(h[0] for h in hs) / len(hs)), round(sum(h[1] for h in hs) / len(hs)),
+                        round(c["ht"] - c["T"], 1), len(hs)]
+            out_util.append(row)
         games[rnd_game]["rounds"].append({
-            "n": r.n, "t0": round(r.t0), "dur": round(t_end - r.t0, 1),
+            "n": r.n, "t0": round(r.t0), "dur": round(dur, 1),
             "sides": r.sides, "winner": r.winner, "wt": r.win_type,
-            "plant": r.plant, "pl": out_pl, "ops": out_ops,
+            "plant": r.plant, "pl": out_pl, "ops": out_ops, "util": out_util,
+            "st": {pid: st["start"] for pid, st in r.P.items() if st.get("start")},
         })
 
     with zstd.open(path, "rt", encoding="utf-8") as fh:
@@ -202,6 +289,25 @@ def extract_series(path: str, valid_games: set[str]) -> dict:
                 if rnd is None or gid != rnd_game or rnd.ended:
                     continue
 
+                if ty == "player-!used-ability":
+                    gone = e.get("revertedEventId")
+                    rnd.util = [c for c in rnd.util if c["eid"] != gone]
+                    rnd.abil = [c for c in rnd.abil if c.get("eid") != gone]
+                    continue
+                if ty == "player-used-ability" and e.get("revertedEventId"):
+                    continue    # a taken-back cast being re-applied, not a new one
+                if ty == "player-used-ability" and rnd.t_end is None:
+                    a = e["actor"]
+                    if a["id"] in rnd.P:
+                        fr = supp.get(e["id"])
+                        ap = None if fr else _pos(a["state"])
+                        if fr or ap:
+                            rnd.util.append({
+                                "T": t, "a": a["id"], "id": e["target"]["id"], "eid": e["id"],
+                                "fr": fr or (ap[0], ap[1], None, None),
+                                "src": 0 if fr else 1,   # 1 = GRID position only, no aim
+                            })
+
                 if ty == "round-ended-freezetime":
                     rnd.t0 = t
                     for tm in g["teams"]:
@@ -217,6 +323,8 @@ def extract_series(path: str, valid_games: set[str]) -> dict:
                             st["ar"] = next((s for s in SHIELDS if s in items), "")
                             st["alive"] = True
                             st["track"], st["last"] = [], None
+                            pos = p.get("position")     # where they stand as the barriers drop
+                            st["start"] = (round(pos["x"]), round(pos["y"])) if pos else None
                 elif ty == "game-ended-round":
                     for tm in g["teams"]:
                         for p in tm["players"]:
@@ -238,6 +346,15 @@ def extract_series(path: str, valid_games: set[str]) -> dict:
                     srcs = delta.get("damageDealtSources") or []
                     parts = delta.get("damageDealtTargets") or []
                     ap, vp = _pos(a["state"]), _pos(v["state"])
+                    if srcs and vp:
+                        # Where an enemy stood when an ability first hurt them marks
+                        # roughly where it landed.
+                        name = (srcs[0].get("source") or {}).get("name", "")
+                        for c in reversed(rnd.util):
+                            if c["a"] == a["id"] and c["id"] == name:
+                                c.setdefault("hits", {}).setdefault(v["id"], vp)
+                                c.setdefault("ht", t)
+                                break
                     if srcs and ap and vp:
                         rnd.dmg.append({
                             "t": rt, "a": a["id"], "v": v["id"],
@@ -273,7 +390,7 @@ def extract_series(path: str, valid_games: set[str]) -> dict:
                     ap = _pos(a["state"])
                     if ap:
                         rnd.abil.append({"t": rt, "a": a["id"], "id": e["target"]["id"],
-                                         "x": ap[0], "y": ap[1]})
+                                         "x": ap[0], "y": ap[1], "eid": e["id"]})
                     if a["id"] in rnd.P:
                         rnd.P[a["id"]]["alive"] = True
                 elif ty == "player-completed-plantBomb" and live:

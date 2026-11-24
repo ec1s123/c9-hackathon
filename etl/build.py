@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Operator-tendency dataset the web app reads.
+"""Build the Operator-tendency and utility datasets the web app reads.
 
     python3 etl/build.py                 # all VALORANT series
     python3 etl/build.py --limit 20      # quick smoke run
@@ -22,7 +22,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from extract import EXTRACT_VERSION, OP_COST, extract_series  # noqa: E402
+from extract import AFTER_S, EXTRACT_VERSION, OP_COST, extract_series  # noqa: E402
+from utility import UtilBuilder  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data"
@@ -44,8 +45,8 @@ def read_csv(path: Path) -> list[dict]:
 
 
 def _work(job):
-    sid, path, valid, cache = job
-    out = extract_series(path, set(valid))
+    sid, path, valid, cache, supplement = job
+    out = extract_series(path, set(valid), supplement)
     tmp = cache + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(out, f, separators=(",", ":"))
@@ -62,7 +63,8 @@ def run_extract(data: Path, series: list[dict], games_by_series: dict, jobs: int
         valid = [g["game_id"] for g in games_by_series.get(s["series_id"], [])]
         if not valid or (cache.exists() and not force):
             continue
-        todo.append((s["series_id"], str(data / s["file"]), valid, str(cache)))
+        supplement = str(data / s["ability_supplement"]) if s.get("ability_supplement") else None
+        todo.append((s["series_id"], str(data / s["file"]), valid, str(cache), supplement))
     if not todo:
         print("extract: cache is up to date")
         return cache_dir
@@ -105,6 +107,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
     lg_team = defaultdict(lambda: [0] * 4)
     lg_names: dict[str, str] = {}
     lg_games = defaultdict(int)      # (team, event) -> maps played
+    util = UtilBuilder(AFTER_S)
     n_games = n_rounds = n_ops = 0
     missing = []
 
@@ -131,6 +134,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
                 continue
             score = {mg["team1_id"]: int(mg["team1_score"] or 0),
                      mg["team2_id"]: int(mg["team2_score"] or 0)}
+            util.add_game(s, mg, g, names, team_names)
 
             # League-wide baseline, both teams.
             for r in g["rounds"]:
@@ -293,6 +297,7 @@ def assemble(data: Path, series: list[dict], games_by_series: dict, cache_dir: P
     size = sum(p.stat().st_size for p in tdir.glob("*.json")) / 1e6
     print(f"assemble: {len(teams)} teams, {n_games} games, {n_rounds} rounds, "
           f"{n_ops} Operator player-rounds, {size:.0f} MB of team files")
+    print("utility: " + util.write(OUT / "util"))
     if missing:
         print(f"  {len(missing)} series had no cache (failed or skipped): {missing[:10]}")
 

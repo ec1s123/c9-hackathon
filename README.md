@@ -2,14 +2,16 @@
 
 Scouting tool for how a VALORANT team uses the Operator: who buys it and when,
 where they play it from, when their shots land, and where they go after a kill.
-Built on the Sky's The Limit 2026 hackathon GRID data.
+It also maps every team's utility: where each ability gets used on each map and
+side, when in the round, what is stacked together, and where the player goes
+next. Built on the Sky's The Limit 2026 hackathon GRID data.
 
 ## Run it
 
 Needs Python 3.14+ (zstd is in the standard library) and nothing else.
 
 ```bash
-python3 etl/build.py        # ~2 min: reads all 857 series, writes data/
+python3 etl/build.py        # ~2 min: reads all 857 series and their ability supplements, writes data/
 python3 etl/fetch_maps.py   # once: minimap images + callout names
 python3 etl/fetch_assets.py # once: team logos, agent, ability and weapon icons
 python3 serve.py            # opens http://localhost:8000/web/
@@ -47,6 +49,100 @@ always draws a single map: if none is picked it shows the one with the most
 Operator rounds and marks that tile "shown below". The search box on team pages (press `/`) jumps to another team,
 player, agent or map. "League stats" in the top bar is the all-teams view:
 which agents carry the Operator, on which maps, and a sortable player table.
+
+## Utility
+
+"Utility" in the top bar (or the Utility tab on a team page, which opens it for
+that team) is one map and one side at a time:
+`/web/?view=util&map=haven&side=d&team=79&role=Sentinel`.
+
+It opens on **pre-round**: everything used before the barriers drop, drawn
+where the player was standing when they used it. That position (and the aim,
+and the time) is exact for every ability.
+
+- **Where**: a heatmap of where utility is used from, a dot for each use with
+  a line showing the aim, and the common spots numbered as in the table. Dots
+  turn on by themselves once the selection is under 800 uses. "Where it lands,
+  if known" switches to landing spots for the abilities that have one (below)
+  and leaves the rest where the player stood.
+- **When**: pre-round, the first 3 seconds after the barriers drop, 3 to 30 s,
+  30 s+, after the plant, or the whole round.
+- **Where they start**: where each player (one team) or agent (all teams) is
+  standing the moment the barriers drop, as their most common areas with
+  shares. "Players: As the barriers drop" above the map draws it as an orange
+  heat, with the agent's face on each usual spot when there are few enough to
+  read.
+- **What**: by agent role, type (traps, smokes, mollies, flashes, recon, stuns),
+  agent, or one ability. The "Show" chips are shortcuts, e.g. Sentinel setups =
+  sentinels, before the barriers.
+- **Habits**: the cards above the map. The same ability from the same spot
+  round after round (thrown abilities need the same crosshair too), ranked by
+  the share of rounds that agent was played: "Recon Bolt from A Garden, 42 of
+  204 rounds". With a team picked they name the player. Click one to isolate it.
+- **Rounds to check in the VOD**: under the map whenever something is isolated:
+  date, opponent, round and seconds since the barriers dropped for every use.
+- **Common spots**: places one ability keeps going, with the share of rounds
+  that agent was played and where the player is 5 s later. Click a row to
+  isolate it: the map then draws a line from each use to that later position.
+- **Repeated lineups**: the same ability from the same spot (within 1.5 m)
+  with the same crosshair (within 5°) in three rounds or more. Position and aim
+  are exact for every ability, smokes included, so this works even where the
+  landing spot is unknown.
+- **Used together**: pairs of abilities within 5 m and 10 s of each other, same
+  team, same round.
+- **Players: 5 s after use**: where the player is five seconds after using the
+  ability, as the same orange layer.
+
+What the data can and cannot say about where an ability ends up:
+
+| Ability kind | Examples | What is shown |
+|---|---|---|
+| Placed at the player's feet or just ahead | turret, alarmbot, trapwire, trademark, shear, Sage wall | The spot, good to a few metres |
+| Deals damage and hit someone | any molly, shock bolt, Brimstone and Tejo ultimates | Where the enemies it hurt were standing: about 3 m |
+| Thrown, hit nobody, but identical to throws that did | snake bite, paint shells, incendiary, nanoswarm, shock bolt | The landing of those identical throws: about 3 to 5 m |
+| Thrown, deals damage, nothing to confirm it | the rest of the mollies | A distance read off the throw angle: 5 to 10 m, "roughly here" |
+| Sova's bow, flat shot (crosshair under 15° up) | recon bolt, shock bolt | The first mapped wall on the line of aim: about 8 m, ignores bounces |
+| Thrown or fired, deals no damage | cyber cage, poison cloud, flashes, lobbed recon bolts, Omen smokes | Where the player stood and which way they aimed |
+| Travels out from the player | toxic screen, fault line, drones, Fade prowler | Where the player stood and which way they aimed |
+| Placed through the map | Brimstone and Clove smokes, Astra stars, Tejo salvo | Where the player stood, nothing more |
+
+No feed records a landing spot (checked: every event type and every field in
+76 series, two per tournament; the only positions anywhere are the players').
+The one trace an ability leaves is damage, and the build uses it three ways:
+
+1. **Observed.** If it hurt someone, it landed where they stood. 21,165 casts.
+2. **Matched.** Two throws from the same spot (1.5 m) with the same aim (4°)
+   land in the same place, so a throw that hit nobody takes the landing of two
+   or more observed throws it is identical to, provided those agree with each
+   other. 17,012 casts. Tested by hiding each observed throw in turn and
+   predicting it from the others: median 3 to 5 m from where the enemy stood,
+   which is about the scatter of enemies inside the area itself.
+3. **Fitted.** Otherwise the distance from thrower to victim, along the aim, is
+   tabulated against the aim's pitch (`fit` in `data/util/index.json`) and read
+   off that table: median 5 to 9 m by the same test. No walls are modelled.
+
+**The bow.** How hard it was drawn and how many bounces were set are not
+recorded, and no arrow speed fits the shock bolts that hit someone, so a
+"full draw lands here" calculation is not possible from this data. What does
+hold up is that a flat shot sticks in the first wall on its line (the minimap
+image is the wall data): on 2,431 flat shock bolts that hit someone that is a
+median 7.9 m from the victim, 80% within 14 m, where the archer was 22 m away.
+Recon and shock bolts aimed less than 15° above level are shown that way (73%
+of recon bolts). Lobbed ones get no landing: nothing tested came closer than
+16 m. Isolating a bow lineup draws the exact line it leaves on, and a dashed
+circle as wide as that error at the wall.
+
+How much of each ability ends up with a known (observed or matched) landing:
+snake bite and paint shells about half, incendiary 37%, shock bolt, hot hands
+and frag/ment about a quarter, nanoswarm 12%, razorvine 8% (those two mostly
+never touch anyone). The note under the map gives the split for whatever is
+selected, and each dot's tooltip says which kind it is. "Where it is used from"
+switches the whole map to exact player positions. The table of abilities is
+`web/utilmeta.js`.
+
+Left out as not utility: Neon's sprint, Chamber's weapons and Iso's Double Tap.
+Movement and self-buffs are kept but hidden unless you pick "Movement & self" or
+that ability.
 
 ## What each team tab answers
 
@@ -88,6 +184,23 @@ The feed has no purchase events and no weapon-pickup events, so:
 - **Shots**: only shots that hit are recorded. There is no way to see a missed
   shot or a peek that found nobody, so "when they peek" is approximated by when
   their shots land and when they take damage.
+- **Ability position and aim**: from the ability supplement (the player's
+  position and view at the moment of the cast, interpolated from 5 Hz movement
+  samples; 1 Hz for VCT Americas 2025, so those are looser). The 0.5% of casts
+  it has no usable sample for fall back to GRID's own 2D position, with no aim.
+  The supplement's extra records that GRID does not report all sit in the
+  second between two rounds (charges refilling) and are ignored.
+- **Restarted rounds**: the feed takes a restarted round's casts back and
+  re-applies them with stale times; those are not counted.
+- **Round time for utility**: seconds from the barriers dropping; anything in
+  the buy phase is negative and shown as "before barriers". Casts after the
+  round is decided are left out.
+- **Starting positions**: every player's position in the feed's own snapshot at
+  the event that ends the buy phase. GRID positions are 2D and can lag by a few
+  metres.
+- **5 s later**: the caster's position five seconds after the cast (for
+  buy-phase casts, five seconds into the round), from the same irregular
+  position samples as the Operator tracks. Blank if they died first.
 - **Areas**: nearest callout label to the position. Approximate near borders.
 - Kills after the round is already decided are left out.
 
@@ -97,8 +210,10 @@ counts match exactly, Operator kills 368 of 369.
 ## Layout
 
 ```
-etl/extract.py     one series feed -> per-round records
+etl/extract.py     one series feed (+ its ability supplement) -> per-round records
 etl/build.py       runs extract over every series in parallel, writes data/
+etl/utility.py     every ability cast -> data/util/<map>.json, plus the
+                   throw-distance tables fitted from damage events
 etl/fetch_maps.py  minimaps and callouts from valorant-api.com
 etl/fetch_assets.py  agent, ability and weapon icons from valorant-api.com,
                    team logos from vlr.gg (exact name matches only)
@@ -107,6 +222,8 @@ web/               no-build front end (ES modules, canvas, SVG)
   home.js          team picker (first screen)
   league.js        league stats view and the roll-ups behind the picker
                    (both read data/league.json)
+  utility.js       utility map: filters, heat, common spots, used together
+  utilmeta.js      what each ability is and how its landing spot is known
   search.js        search box behaviour
   icons.js         logos and icons, with monogram fallbacks
 serve.py           local static server
@@ -118,6 +235,3 @@ repo. About 120 of the 160 teams have a logo on vlr.gg under the same name; the
 rest get a monogram. To fix one by hand, add its vlr.gg name to `TEAM_ALIAS` in
 `etl/fetch_assets.py` or drop a PNG at `data/img/teams/<team id>.png`, then run
 the script again.
-
-Not used yet: the ability supplement (precise cast position and aim direction),
-which could add facing direction at the moment an escape ability is used.
